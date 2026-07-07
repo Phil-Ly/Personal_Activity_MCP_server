@@ -8,6 +8,7 @@ from personal_activity_mcp.calendar import (
     CalendarCreateResult,
     CalendarListResult,
     CalendarRepository,
+    CalendarUpdateResult,
 )
 
 
@@ -61,5 +62,39 @@ def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> 
             location=location,
             timezone=timezone,
             provenance_ids=provenance_ids,
+            idempotency_key=idempotency_key,
+        )
+
+    @server.tool(
+        name="calendar.update_event",
+        description="Update an Apple Calendar event in an explicitly write-enabled Calendar.",
+        structured_output=True,
+    )
+    def update_calendar_event(
+        calendar_id: str,
+        event_id: str,
+        title: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        is_all_day: bool | None,
+        notes: str | None,
+        location: str | None,
+        timezone: str,
+        provenance_ids: list[str],
+        confirmed_by_user: bool,
+        idempotency_key: str,
+    ) -> CalendarUpdateResult:
+        return repository.update_event(
+            calendar_id=calendar_id,
+            event_id=event_id,
+            title=title,
+            start=start,
+            end=end,
+            is_all_day=is_all_day,
+            notes=notes,
+            location=location,
+            timezone=timezone,
+            provenance_ids=provenance_ids,
+            confirmed_by_user=confirmed_by_user,
             idempotency_key=idempotency_key,
         )

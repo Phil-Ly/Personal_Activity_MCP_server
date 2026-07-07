@@ -28,6 +28,14 @@ class CalendarEventRecord(BaseModel):
     notes: str | None = None
 
 
+class CalendarEnsureRecord(BaseModel):
+    """Raw Calendar ensure result returned by a Calendar backend."""
+
+    calendar_id: str
+    calendar_title: str
+    created: bool
+
+
 class CalendarEventEvidence(BaseModel):
     """Calendar event evidence returned through an MCP Tool."""
 
@@ -66,3 +74,18 @@ class CalendarCreateResult(BaseModel):
     deduplicated: bool
     status_semantics: Literal["planned"]
     provenance_ids: list[str]
+
+
+class CalendarUpdateResult(BaseModel):
+    """Calendar update-event result."""
+
+    event_id: str
+    calendar_id: str
+    stable_id: str
+    updated: bool
+    deduplicated: bool
+    updated_fields: list[str]
+    requires_user_confirmation: bool
+    status_semantics: Literal["planned", "probable", "confirmed"]
+    provenance_ids: list[str]
+    audit_id: str | None

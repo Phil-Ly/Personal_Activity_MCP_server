@@ -59,6 +59,7 @@ def test_load_config_accepts_calendar_allowlist(tmp_path: Path) -> None:
     config_path.write_text(
         f"""
 default_timezone = "Asia/Shanghai"
+default_activity_log_calendar_id = "Personal Activity Log"
 
 [[journal_sources]]
 source_id = "daily"
@@ -80,11 +81,67 @@ allow_write = false
     config = load_config(config_path)
 
     assert config.default_timezone == "Asia/Shanghai"
+    assert config.default_activity_log_calendar_id == "Personal Activity Log"
     assert config.calendar_sources[0].calendar_id == "Personal"
     assert config.calendar_sources[0].title == "Personal"
     assert config.calendar_sources[0].allow_write is True
     assert config.calendar_sources[1].calendar_id == "Work"
     assert config.calendar_sources[1].allow_write is False
+
+
+def test_load_config_accepts_reminder_list_allowlist(tmp_path: Path) -> None:
+    journal_path = tmp_path / "journal"
+    journal_path.mkdir()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"""
+[[journal_sources]]
+source_id = "daily"
+path = "{journal_path}"
+
+[[reminder_sources]]
+list_id = "Personal"
+title = "Personal"
+allow_write = true
+
+[[reminder_sources]]
+list_id = "Work"
+title = "Work"
+allow_write = false
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.reminder_sources[0].list_id == "Personal"
+    assert config.reminder_sources[0].title == "Personal"
+    assert config.reminder_sources[0].allow_write is True
+    assert config.reminder_sources[1].list_id == "Work"
+    assert config.reminder_sources[1].allow_write is False
+
+
+def test_load_config_rejects_duplicate_reminder_list_ids(tmp_path: Path) -> None:
+    journal_path = tmp_path / "journal"
+    journal_path.mkdir()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f"""
+[[journal_sources]]
+source_id = "daily"
+path = "{journal_path}"
+
+[[reminder_sources]]
+list_id = "Personal"
+
+[[reminder_sources]]
+list_id = "Personal"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="Duplicate reminder list_id: Personal"):
+        load_config(config_path)
 
 
 def test_load_config_rejects_duplicate_calendar_ids(tmp_path: Path) -> None:

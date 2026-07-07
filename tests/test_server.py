@@ -4,13 +4,16 @@ from pathlib import Path
 
 import anyio
 
-from personal_activity_mcp.calendar import CalendarEventRecord
+from personal_activity_mcp.calendar import CalendarEnsureRecord, CalendarEventRecord
+from personal_activity_mcp.reminders import ReminderRecord
 from personal_activity_mcp.server import create_server, main
 
 
 class FakeCalendarBackend:
     def __init__(self) -> None:
         self.created_events: list[dict[str, object]] = []
+        self.updated_events: list[dict[str, object]] = []
+        self.ensured_calendars: list[dict[str, object]] = []
 
     def list_events(
         self,
@@ -66,6 +69,136 @@ class FakeCalendarBackend:
             notes=notes,
         )
 
+    def update_event(
+        self,
+        *,
+        event_id: str,
+        calendar_id: str,
+        title: str | None,
+        start,
+        end,
+        is_all_day: bool | None,
+        notes: str | None,
+        location: str | None,
+        timezone: str,
+    ) -> CalendarEventRecord:
+        self.updated_events.append(
+            {
+                "event_id": event_id,
+                "calendar_id": calendar_id,
+                "title": title,
+                "start": start,
+                "end": end,
+                "timezone": timezone,
+            }
+        )
+        return CalendarEventRecord(
+            event_id=event_id,
+            calendar_id=calendar_id,
+            title=title or "Calendar demo",
+            start=start,
+            end=end,
+            is_all_day=bool(is_all_day),
+            location=location,
+            notes=notes,
+        )
+
+    def ensure_calendar(
+        self, *, calendar_title: str, create_if_missing: bool
+    ) -> CalendarEnsureRecord:
+        self.ensured_calendars.append(
+            {
+                "calendar_title": calendar_title,
+                "create_if_missing": create_if_missing,
+            }
+        )
+        return CalendarEnsureRecord(
+            calendar_id=calendar_title,
+            calendar_title=calendar_title,
+            created=False,
+        )
+
+
+class FakeReminderBackend:
+    def __init__(self) -> None:
+        self.created_reminders: list[dict[str, object]] = []
+        self.completed_reminders: list[dict[str, object]] = []
+
+    def list_reminders(
+        self,
+        *,
+        list_ids: list[str],
+        start_due_date,
+        end_due_date,
+        include_completed: bool,
+        include_notes: bool,
+    ) -> list[ReminderRecord]:
+        return [
+            ReminderRecord(
+                reminder_id="reminder-1",
+                list_id=list_ids[0],
+                title="Reminder demo",
+                notes="Private notes",
+                due_date=start_due_date,
+                priority=5,
+                is_completed=False,
+                completion_date=None,
+            )
+        ]
+
+    def create_reminder(
+        self,
+        *,
+        list_id: str,
+        title: str,
+        notes: str | None,
+        due_date,
+        priority: int | None,
+    ) -> ReminderRecord:
+        self.created_reminders.append(
+            {
+                "list_id": list_id,
+                "title": title,
+                "due_date": due_date,
+                "priority": priority,
+            }
+        )
+        return ReminderRecord(
+            reminder_id="created-reminder-1",
+            list_id=list_id,
+            title=title,
+            notes=notes,
+            due_date=due_date,
+            priority=priority,
+            is_completed=False,
+            completion_date=None,
+        )
+
+    def complete_reminder(
+        self,
+        *,
+        reminder_id: str,
+        list_ids: list[str],
+        completion_date,
+    ) -> ReminderRecord:
+        self.completed_reminders.append(
+            {
+                "reminder_id": reminder_id,
+                "list_ids": list_ids,
+                "completion_date": completion_date,
+            }
+        )
+        return ReminderRecord(
+            reminder_id=reminder_id,
+            list_id=list_ids[0],
+            title="Reminder demo",
+            notes=None,
+            due_date=None,
+            priority=None,
+            is_completed=True,
+            completion_date=completion_date,
+        )
+
 
 def write_config(config_path: Path, journal_path: Path) -> None:
     config_path.write_text(
@@ -108,6 +241,30 @@ extensions = [".md", ".txt"]
 calendar_id = "Personal"
 title = "Personal"
 allow_write = true
+
+[[calendar_sources]]
+calendar_id = "Personal Activity Log"
+title = "Personal Activity Log"
+allow_write = true
+""".strip(),
+        encoding="utf-8",
+    )
+
+
+def write_config_with_reminders(config_path: Path, journal_path: Path, sidecar_path: Path) -> None:
+    config_path.write_text(
+        f"""
+sidecar_path = "{sidecar_path}"
+
+[[journal_sources]]
+source_id = "daily"
+path = "{journal_path}"
+extensions = [".md", ".txt"]
+
+[[reminder_sources]]
+list_id = "Personal"
+title = "Personal"
+allow_write = true
 """.strip(),
         encoding="utf-8",
     )
@@ -128,7 +285,14 @@ def test_server_exposes_journal_tool_and_resource_template(tmp_path: Path) -> No
         "journal.search_entries",
         "calendar.list_events",
         "calendar.create_event",
+        "calendar.update_event",
+        "activity.ensure_log_calendar",
+        "activity.record_completed_action",
+        "reminders.list_reminders",
+        "reminders.create_reminder",
+        "reminders.complete_reminder",
     ]
+    assert "reminders.delete_reminder" not in [tool.name for tool in tools]
     assert str(templates[0].uriTemplate) == "journal://{source_id}/{entry_id}"
 
 
@@ -241,12 +405,116 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
             "idempotency_key": "calendar:create:demo",
         },
     )
+    _, update_result = anyio.run(
+        server.call_tool,
+        "calendar.update_event",
+        {
+            "calendar_id": "Personal",
+            "event_id": "created-event-1",
+            "title": "Updated MCP demo",
+            "start": "2026-07-08T12:00:00+00:00",
+            "end": "2026-07-08T13:00:00+00:00",
+            "is_all_day": False,
+            "notes": None,
+            "location": None,
+            "timezone": "Asia/Shanghai",
+            "provenance_ids": [],
+            "confirmed_by_user": False,
+            "idempotency_key": "calendar:update:demo",
+        },
+    )
+    _, ensure_result = anyio.run(
+        server.call_tool,
+        "activity.ensure_log_calendar",
+        {
+            "calendar_title": "Personal Activity Log",
+            "create_if_missing": True,
+        },
+    )
+    _, activity_result = anyio.run(
+        server.call_tool,
+        "activity.record_completed_action",
+        {
+            "calendar_id": "Personal Activity Log",
+            "title": "MCP completed work",
+            "start": "2026-07-06T10:00:00+00:00",
+            "end": "2026-07-06T11:00:00+00:00",
+            "is_all_day": False,
+            "category": "engineering",
+            "project": "Personal Event MCP",
+            "notes": None,
+            "location": None,
+            "timezone": "Asia/Shanghai",
+            "provenance_ids": [],
+            "confirmed_by_user": True,
+            "idempotency_key": "activity:record:demo",
+        },
+    )
 
     assert list_result["events"][0]["event_id"] == "event-1"
     assert list_result["events"][0]["notes"] is None
     assert create_result["event_id"] == "created-event-1"
     assert create_result["created"] is True
-    assert len(backend.created_events) == 1
+    assert update_result["event_id"] == "created-event-1"
+    assert update_result["updated"] is True
+    assert ensure_result["calendar_id"] == "Personal Activity Log"
+    assert activity_result["event_id"] == "created-event-1"
+    assert activity_result["status_semantics"] == "confirmed"
+    assert len(backend.created_events) == 2
+    assert len(backend.updated_events) == 1
+    assert len(backend.ensured_calendars) == 1
+
+
+def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path) -> None:
+    journal_path = tmp_path / "journal"
+    journal_path.mkdir()
+    sidecar_path = tmp_path / "state" / "activity.sqlite3"
+    config_path = tmp_path / "config.toml"
+    write_config_with_reminders(config_path, journal_path, sidecar_path)
+    backend = FakeReminderBackend()
+    server = create_server(config_path, reminder_backend=backend)
+
+    _, list_result = anyio.run(
+        server.call_tool,
+        "reminders.list_reminders",
+        {
+            "list_ids": ["Personal"],
+            "start_due_date": "2026-07-09",
+            "end_due_date": "2026-07-10",
+        },
+    )
+    _, create_result = anyio.run(
+        server.call_tool,
+        "reminders.create_reminder",
+        {
+            "list_id": "Personal",
+            "title": "MCP todo",
+            "notes": None,
+            "due_date": "2026-07-09",
+            "priority": 5,
+            "provenance_ids": [],
+            "idempotency_key": "reminder:create:demo",
+        },
+    )
+    _, complete_result = anyio.run(
+        server.call_tool,
+        "reminders.complete_reminder",
+        {
+            "reminder_id": "created-reminder-1",
+            "completion_date": "2026-07-09T12:00:00+00:00",
+            "confirmed_by_user": True,
+            "idempotency_key": "reminder:complete:demo",
+        },
+    )
+
+    assert list_result["reminders"][0]["reminder_id"] == "reminder-1"
+    assert list_result["reminders"][0]["notes"] is None
+    assert create_result["reminder_id"] == "created-reminder-1"
+    assert create_result["created"] is True
+    assert complete_result["reminder_id"] == "created-reminder-1"
+    assert complete_result["is_completed"] is True
+    assert len(backend.created_reminders) == 1
+    assert len(backend.completed_reminders) == 1
 
 
 def test_main_reports_missing_configuration_without_traceback(

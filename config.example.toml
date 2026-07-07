@@ -6,6 +6,7 @@
 # and operation audit rows. It must not store journal bodies or LLM summaries.
 sidecar_path = "/Users/your-name/.local/share/personal-activity-mcp/personal_activity.sqlite3"
 default_timezone = "Asia/Shanghai"
+default_activity_log_calendar_id = "Personal Activity Log"
 
 [[journal_sources]]
 source_id = "daily"
@@ -20,5 +21,22 @@ allow_write = true
 
 [[calendar_sources]]
 calendar_id = "Work"
+title = "Work"
+allow_write = false
+
+[[calendar_sources]]
+# Dedicated target for activity.record_completed_action.
+calendar_id = "Personal Activity Log"
+title = "Personal Activity Log"
+allow_write = true
+
+[[reminder_sources]]
+# In the current macOS backend, list_id is the Reminders.app list name.
+list_id = "Personal"
+title = "Personal"
+allow_write = true
+
+[[reminder_sources]]
+list_id = "Work"
 title = "Work"
 allow_write = false

@@ -14,6 +14,7 @@ from personal_activity_mcp.calendar.models import (
     CalendarEventRecord,
     CalendarListResult,
     CalendarTimeRange,
+    CalendarUpdateResult,
 )
 from personal_activity_mcp.config import AppConfig
 from personal_activity_mcp.sidecar import SidecarRepository
@@ -40,6 +41,20 @@ class CalendarBackend(Protocol):
         start: datetime,
         end: datetime,
         is_all_day: bool,
+        notes: str | None,
+        location: str | None,
+        timezone: str,
+    ) -> CalendarEventRecord: ...
+
+    def update_event(
+        self,
+        *,
+        event_id: str,
+        calendar_id: str,
+        title: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        is_all_day: bool | None,
         notes: str | None,
         location: str | None,
         timezone: str,
@@ -208,6 +223,178 @@ class CalendarRepository:
             provenance_ids=provenance_ids,
         )
 
+    def update_event(
+        self,
+        *,
+        calendar_id: str,
+        event_id: str,
+        title: str | None,
+        start: datetime | None,
+        end: datetime | None,
+        is_all_day: bool | None,
+        notes: str | None,
+        location: str | None,
+        timezone: str,
+        provenance_ids: list[str],
+        confirmed_by_user: bool,
+        idempotency_key: str,
+    ) -> CalendarUpdateResult:
+        """Update a Calendar event with allowlist, safety, idempotency, and audit controls."""
+        source = self._calendar_sources.get(calendar_id)
+        if source is None:
+            raise ValueError(f"Unknown calendar_ids: {calendar_id}")
+        if not source.allow_write:
+            raise ValueError(f"Calendar is not allowed for writes: {calendar_id}")
+        if self._sidecar is None:
+            raise ValueError("sidecar is required for calendar.update_event")
+        if not event_id.strip():
+            raise ValueError("event_id must be a non-empty string")
+        if title is not None and not title.strip():
+            raise ValueError("title must be a non-empty string when provided")
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must be a non-empty string")
+        _validate_timezone(timezone)
+        if start is not None and end is not None and start >= end:
+            raise ValueError("start must be before end")
+
+        sidecar_item = self._sidecar_item_for_calendar_event(
+            external_id=event_id,
+            external_calendar_or_list_id=calendar_id,
+        )
+        if _is_confirmed_action_record(sidecar_item) and not confirmed_by_user:
+            request_hash = _request_hash(
+                {
+                    "calendar_id": calendar_id,
+                    "event_id": event_id,
+                    "operation": "calendar.update_event",
+                }
+            )
+            self._sidecar.record_operation_audit(
+                operation="calendar.update_event",
+                target_item_id=str(sidecar_item["id"]) if sidecar_item is not None else None,
+                request_hash=request_hash,
+                result_status="blocked",
+                error_code="USER_CONFIRMATION_REQUIRED",
+                confirmed_by_user=False,
+            )
+            raise ValueError("USER_CONFIRMATION_REQUIRED")
+
+        updated_fields = _updated_fields(
+            title=title,
+            start=start,
+            end=end,
+            is_all_day=is_all_day,
+            notes=notes,
+            location=location,
+        )
+        if not updated_fields:
+            raise ValueError("At least one update field is required")
+
+        request_hash = _request_hash(
+            {
+                "calendar_id": calendar_id,
+                "event_id": event_id,
+                "title": title,
+                "start": start.isoformat() if start is not None else None,
+                "end": end.isoformat() if end is not None else None,
+                "is_all_day": is_all_day,
+                "notes": notes,
+                "location": location,
+                "timezone": timezone,
+                "provenance_ids": provenance_ids,
+                "confirmed_by_user": confirmed_by_user,
+            }
+        )
+        decision = self._sidecar.check_idempotency_key(
+            key=idempotency_key,
+            operation="calendar.update_event",
+            request_hash=request_hash,
+        )
+        if decision.decision == "conflict":
+            raise ValueError("idempotency_key conflicts with different request")
+        if decision.decision == "deduplicated":
+            item = self._sidecar.get_mcp_item(decision.result_item_id or "")
+            if item is None:
+                raise ValueError("idempotency result item is missing")
+            return CalendarUpdateResult(
+                event_id=str(item["external_id"]),
+                calendar_id=str(item["external_calendar_or_list_id"]),
+                stable_id=str(item["id"]),
+                updated=False,
+                deduplicated=True,
+                updated_fields=updated_fields,
+                requires_user_confirmation=False,
+                status_semantics=_sidecar_status_semantics(item),
+                provenance_ids=provenance_ids,
+                audit_id=None,
+            )
+
+        record = self._backend.update_event(
+            event_id=event_id,
+            calendar_id=calendar_id,
+            title=title,
+            start=start,
+            end=end,
+            is_all_day=is_all_day,
+            notes=notes,
+            location=location,
+            timezone=timezone,
+        )
+        stable_id = (
+            str(sidecar_item["id"])
+            if sidecar_item is not None
+            else _stable_calendar_item_id(f"{calendar_id}:{event_id}")
+        )
+        status_semantics = (
+            _sidecar_status_semantics(sidecar_item) if sidecar_item is not None else "planned"
+        )
+        self._sidecar.upsert_mcp_item(
+            item_id=stable_id,
+            item_type=str(sidecar_item["item_type"])
+            if sidecar_item is not None
+            else "calendar_event",
+            external_id=record.event_id,
+            external_calendar_or_list_id=calendar_id,
+            title_hash=_request_hash({"title": record.title}),
+            time_start=record.start.isoformat(),
+            time_end=record.end.isoformat(),
+            status_semantics=status_semantics,
+            created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
+        )
+        for provenance_id in provenance_ids:
+            self._sidecar.record_provenance_link(
+                target_item_id=stable_id,
+                evidence_type=_evidence_type_from_id(provenance_id),
+                evidence_id=provenance_id,
+                relation_type="updated_from",
+            )
+        self._sidecar.record_idempotency_success(
+            key=idempotency_key,
+            operation="calendar.update_event",
+            request_hash=request_hash,
+            result_item_id=stable_id,
+        )
+        audit_id = self._sidecar.record_operation_audit(
+            operation="calendar.update_event",
+            target_item_id=stable_id,
+            request_hash=request_hash,
+            result_status="succeeded",
+            error_code=None,
+            confirmed_by_user=confirmed_by_user,
+        )
+        return CalendarUpdateResult(
+            event_id=record.event_id,
+            calendar_id=calendar_id,
+            stable_id=stable_id,
+            updated=True,
+            deduplicated=False,
+            updated_fields=updated_fields,
+            requires_user_confirmation=False,
+            status_semantics=status_semantics,
+            provenance_ids=provenance_ids,
+            audit_id=audit_id,
+        )
+
     def _select_calendar_ids(self, calendar_ids: list[str] | None) -> list[str]:
         if calendar_ids is None:
             return list(self._calendar_sources)
@@ -226,8 +413,7 @@ class CalendarRepository:
         sidecar_item = None
         provenance_ids: list[str] = []
         if self._sidecar is not None:
-            sidecar_item = self._sidecar.find_mcp_item_by_external(
-                item_type="calendar_event",
+            sidecar_item = self._sidecar_item_for_calendar_event(
                 external_id=record.event_id,
                 external_calendar_or_list_id=record.calendar_id,
             )
@@ -251,6 +437,27 @@ class CalendarRepository:
             provenance_ids=provenance_ids,
         )
 
+    def _sidecar_item_for_calendar_event(
+        self,
+        *,
+        external_id: str,
+        external_calendar_or_list_id: str,
+    ) -> dict[str, object] | None:
+        if self._sidecar is None:
+            return None
+        calendar_item = self._sidecar.find_mcp_item_by_external(
+            item_type="calendar_event",
+            external_id=external_id,
+            external_calendar_or_list_id=external_calendar_or_list_id,
+        )
+        if calendar_item is not None:
+            return calendar_item
+        return self._sidecar.find_mcp_item_by_external(
+            item_type="action_record",
+            external_id=external_id,
+            external_calendar_or_list_id=external_calendar_or_list_id,
+        )
+
 
 def _calendar_evidence_id(calendar_id: str, event_id: str) -> str:
     digest = hashlib.sha256(f"{calendar_id}:{event_id}".encode()).hexdigest()
@@ -264,6 +471,47 @@ def _status_semantics(
     if sidecar_item is not None and sidecar_item["status_semantics"]:
         return sidecar_item["status_semantics"]
     return "probable" if record.end.astimezone(UTC) < datetime.now(UTC) else "planned"
+
+
+def _sidecar_status_semantics(sidecar_item: dict[str, object]) -> str:
+    status = sidecar_item.get("status_semantics")
+    if status in {"planned", "probable", "confirmed"}:
+        return str(status)
+    return "planned"
+
+
+def _is_confirmed_action_record(sidecar_item: dict[str, object] | None) -> bool:
+    if sidecar_item is None:
+        return False
+    return (
+        sidecar_item.get("item_type") == "action_record"
+        and sidecar_item.get("status_semantics") == "confirmed"
+    )
+
+
+def _updated_fields(
+    *,
+    title: str | None,
+    start: datetime | None,
+    end: datetime | None,
+    is_all_day: bool | None,
+    notes: str | None,
+    location: str | None,
+) -> list[str]:
+    fields: list[str] = []
+    if title is not None:
+        fields.append("title")
+    if start is not None:
+        fields.append("start")
+    if end is not None:
+        fields.append("end")
+    if is_all_day is not None:
+        fields.append("is_all_day")
+    if notes is not None:
+        fields.append("notes")
+    if location is not None:
+        fields.append("location")
+    return fields
 
 
 def _stable_calendar_item_id(idempotency_key: str) -> str:

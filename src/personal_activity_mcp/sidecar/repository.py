@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from personal_activity_mcp.config import CalendarSource, JournalSource
+from personal_activity_mcp.config import CalendarSource, JournalSource, ReminderSource
 from personal_activity_mcp.journal import JournalEntryEvidence
 
 
@@ -90,6 +90,31 @@ class SidecarRepository:
                     source.title,
                     f"calendar://{source.calendar_id}",
                     source.calendar_id,
+                ),
+            )
+        return source_id
+
+    def upsert_reminder_source(self, source: ReminderSource) -> str:
+        """Store metadata for one configured Reminder list source."""
+        source_id = f"reminder:{source.list_id}"
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO source (
+                    id, source_type, source_name, source_uri, config_key
+                )
+                VALUES (?, 'reminder', ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    source_name = excluded.source_name,
+                    source_uri = excluded.source_uri,
+                    config_key = excluded.config_key,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    source_id,
+                    source.title,
+                    f"reminder://{source.list_id}",
+                    source.list_id,
                 ),
             )
         return source_id

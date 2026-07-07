@@ -39,6 +39,7 @@ extensions = [".md"]
             ):
                 await session.initialize()
                 tools = await session.list_tools()
+                prompts = await session.list_prompts()
                 templates = await session.list_resource_templates()
                 result = await session.call_tool(
                     "journal.list_entries",
@@ -61,6 +62,20 @@ extensions = [".md"]
             "journal.search_entries",
             "calendar.list_events",
             "calendar.create_event",
+            "calendar.update_event",
+            "activity.ensure_log_calendar",
+            "activity.record_completed_action",
+            "reminders.list_reminders",
+            "reminders.create_reminder",
+            "reminders.complete_reminder",
+        ]
+        assert "reminders.delete_reminder" not in [tool.name for tool in tools.tools]
+        assert [prompt.name for prompt in prompts.prompts] == [
+            "activity.daily_review",
+            "activity.weekly_missing_review",
+            "activity.future_plan",
+            "activity.confirm_uncertain_claims",
+            "activity.write_plan",
         ]
         assert str(templates.resourceTemplates[0].uriTemplate) == (
             "journal://{source_id}/{entry_id}"

@@ -1,7 +1,7 @@
 from datetime import date
 from pathlib import Path
 
-from personal_activity_mcp.config import AppConfig, CalendarSource, JournalSource
+from personal_activity_mcp.config import AppConfig, CalendarSource, JournalSource, ReminderSource
 from personal_activity_mcp.journal import JournalRepository
 from personal_activity_mcp.sidecar import SidecarRepository
 
@@ -88,6 +88,28 @@ def test_upsert_calendar_source_stores_allowlisted_calendar_metadata(
     assert row["source_type"] == "calendar"
     assert row["source_name"] == "Personal"
     assert row["source_uri"] == "calendar://Personal"
+    assert row["config_key"] == "Personal"
+
+
+def test_upsert_reminder_source_stores_allowlisted_list_metadata(
+    tmp_path: Path,
+) -> None:
+    repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    repository.initialize()
+
+    source_id = repository.upsert_reminder_source(
+        ReminderSource(list_id="Personal", title="Personal", allow_write=True)
+    )
+
+    with repository.connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM source WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+    assert row["id"] == "reminder:Personal"
+    assert row["source_type"] == "reminder"
+    assert row["source_name"] == "Personal"
+    assert row["source_uri"] == "reminder://Personal"
     assert row["config_key"] == "Personal"
 
 

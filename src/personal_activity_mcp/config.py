@@ -30,12 +30,23 @@ class CalendarSource:
 
 
 @dataclass(frozen=True)
+class ReminderSource:
+    """A single explicitly authorized Apple Reminders list."""
+
+    list_id: str
+    title: str
+    allow_write: bool
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Validated application configuration."""
 
     journal_sources: tuple[JournalSource, ...]
     sidecar_path: Path = Path(":memory:")
     calendar_sources: tuple[CalendarSource, ...] = ()
+    reminder_sources: tuple[ReminderSource, ...] = ()
+    default_activity_log_calendar_id: str = "Personal Activity Log"
     default_timezone: str = "UTC"
 
 
@@ -67,6 +78,10 @@ def load_config(config_path: Path) -> AppConfig:
         journal_sources=tuple(sources),
         sidecar_path=_parse_sidecar_path(raw.get("sidecar_path"), path.parent),
         calendar_sources=_parse_calendar_sources(raw.get("calendar_sources")),
+        reminder_sources=_parse_reminder_sources(raw.get("reminder_sources")),
+        default_activity_log_calendar_id=_parse_default_activity_log_calendar_id(
+            raw.get("default_activity_log_calendar_id")
+        ),
         default_timezone=_parse_default_timezone(raw.get("default_timezone")),
     )
 
@@ -85,6 +100,14 @@ def _parse_default_timezone(raw_timezone: object) -> str:
     if not isinstance(raw_timezone, str) or not raw_timezone.strip():
         raise ConfigError("default_timezone must be a non-empty string")
     return raw_timezone.strip()
+
+
+def _parse_default_activity_log_calendar_id(raw_calendar_id: object) -> str:
+    if raw_calendar_id is None:
+        return "Personal Activity Log"
+    if not isinstance(raw_calendar_id, str) or not raw_calendar_id.strip():
+        raise ConfigError("default_activity_log_calendar_id must be a non-empty string")
+    return raw_calendar_id.strip()
 
 
 def _parse_calendar_sources(raw_sources: object) -> tuple[CalendarSource, ...]:
@@ -122,6 +145,46 @@ def _parse_calendar_source(raw_source: object) -> CalendarSource:
 
     return CalendarSource(
         calendar_id=calendar_id.strip(),
+        title=title.strip(),
+        allow_write=allow_write,
+    )
+
+
+def _parse_reminder_sources(raw_sources: object) -> tuple[ReminderSource, ...]:
+    if raw_sources is None:
+        return ()
+    if not isinstance(raw_sources, list):
+        raise ConfigError("reminder_sources must be a list")
+
+    sources: list[ReminderSource] = []
+    seen_ids: set[str] = set()
+    for raw_source in raw_sources:
+        source = _parse_reminder_source(raw_source)
+        if source.list_id in seen_ids:
+            raise ConfigError(f"Duplicate reminder list_id: {source.list_id}")
+        seen_ids.add(source.list_id)
+        sources.append(source)
+    return tuple(sources)
+
+
+def _parse_reminder_source(raw_source: object) -> ReminderSource:
+    if not isinstance(raw_source, dict):
+        raise ConfigError("Each reminder_sources entry must be a TOML table")
+
+    list_id = raw_source.get("list_id")
+    if not isinstance(list_id, str) or not list_id.strip():
+        raise ConfigError("Reminder list_id must be a non-empty string")
+
+    title = raw_source.get("title", list_id)
+    if not isinstance(title, str) or not title.strip():
+        raise ConfigError(f"Reminder title must be a non-empty string: {list_id}")
+
+    allow_write = raw_source.get("allow_write", False)
+    if not isinstance(allow_write, bool):
+        raise ConfigError(f"Reminder allow_write must be a boolean: {list_id}")
+
+    return ReminderSource(
+        list_id=list_id.strip(),
         title=title.strip(),
         allow_write=allow_write,
     )
