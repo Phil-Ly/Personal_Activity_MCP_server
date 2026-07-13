@@ -5,6 +5,7 @@ from __future__ import annotations
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ConfigError(ValueError):
@@ -39,6 +40,28 @@ class ReminderSource:
 
 
 @dataclass(frozen=True)
+class PrivacyConfig:
+    """Privacy controls for logging and stored diagnostic data."""
+
+    sensitive_logging_enabled: bool = False
+    log_journal_content: bool = False
+    log_calendar_notes: bool = False
+    log_reminder_notes: bool = False
+    log_llm_outputs: bool = False
+
+
+@dataclass(frozen=True)
+class SecurityPolicy:
+    """Local safety policy for transports and high-risk operations."""
+
+    allow_remote_transport: bool = False
+    allow_bulk_operations: bool = False
+    allow_delete_operations: bool = False
+    require_confirmation_for_completed_actions: bool = True
+    require_confirmation_for_confirmed_action_updates: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Validated application configuration."""
 
@@ -48,6 +71,8 @@ class AppConfig:
     reminder_sources: tuple[ReminderSource, ...] = ()
     default_activity_log_calendar_id: str = "Personal Activity Log"
     default_timezone: str = "UTC"
+    privacy: PrivacyConfig = PrivacyConfig()
+    security: SecurityPolicy = SecurityPolicy()
 
 
 def load_config(config_path: Path) -> AppConfig:
@@ -83,6 +108,8 @@ def load_config(config_path: Path) -> AppConfig:
             raw.get("default_activity_log_calendar_id")
         ),
         default_timezone=_parse_default_timezone(raw.get("default_timezone")),
+        privacy=_parse_privacy_config(raw.get("privacy")),
+        security=_parse_security_policy(raw.get("security")),
     )
 
 
@@ -99,7 +126,12 @@ def _parse_default_timezone(raw_timezone: object) -> str:
         return "UTC"
     if not isinstance(raw_timezone, str) or not raw_timezone.strip():
         raise ConfigError("default_timezone must be a non-empty string")
-    return raw_timezone.strip()
+    timezone = raw_timezone.strip()
+    try:
+        ZoneInfo(timezone)
+    except ZoneInfoNotFoundError as error:
+        raise ConfigError(f"Unknown default_timezone: {timezone}") from error
+    return timezone
 
 
 def _parse_default_activity_log_calendar_id(raw_calendar_id: object) -> str:
@@ -108,6 +140,91 @@ def _parse_default_activity_log_calendar_id(raw_calendar_id: object) -> str:
     if not isinstance(raw_calendar_id, str) or not raw_calendar_id.strip():
         raise ConfigError("default_activity_log_calendar_id must be a non-empty string")
     return raw_calendar_id.strip()
+
+
+def _parse_privacy_config(raw_privacy: object) -> PrivacyConfig:
+    if raw_privacy is None:
+        return PrivacyConfig()
+    if not isinstance(raw_privacy, dict):
+        raise ConfigError("privacy must be a TOML table")
+
+    config = PrivacyConfig(
+        sensitive_logging_enabled=_parse_bool(
+            raw_privacy.get("sensitive_logging_enabled", False),
+            "privacy.sensitive_logging_enabled",
+        ),
+        log_journal_content=_parse_bool(
+            raw_privacy.get("log_journal_content", False),
+            "privacy.log_journal_content",
+        ),
+        log_calendar_notes=_parse_bool(
+            raw_privacy.get("log_calendar_notes", False),
+            "privacy.log_calendar_notes",
+        ),
+        log_reminder_notes=_parse_bool(
+            raw_privacy.get("log_reminder_notes", False),
+            "privacy.log_reminder_notes",
+        ),
+        log_llm_outputs=_parse_bool(
+            raw_privacy.get("log_llm_outputs", False),
+            "privacy.log_llm_outputs",
+        ),
+    )
+    if not config.sensitive_logging_enabled and (
+        config.log_journal_content
+        or config.log_calendar_notes
+        or config.log_reminder_notes
+        or config.log_llm_outputs
+    ):
+        raise ConfigError("Sensitive logging detail flags require sensitive_logging_enabled = true")
+    return config
+
+
+def _parse_security_policy(raw_security: object) -> SecurityPolicy:
+    if raw_security is None:
+        return SecurityPolicy()
+    if not isinstance(raw_security, dict):
+        raise ConfigError("security must be a TOML table")
+
+    policy = SecurityPolicy(
+        allow_remote_transport=_parse_bool(
+            raw_security.get("allow_remote_transport", False),
+            "security.allow_remote_transport",
+        ),
+        allow_bulk_operations=_parse_bool(
+            raw_security.get("allow_bulk_operations", False),
+            "security.allow_bulk_operations",
+        ),
+        allow_delete_operations=_parse_bool(
+            raw_security.get("allow_delete_operations", False),
+            "security.allow_delete_operations",
+        ),
+        require_confirmation_for_completed_actions=_parse_bool(
+            raw_security.get("require_confirmation_for_completed_actions", True),
+            "security.require_confirmation_for_completed_actions",
+        ),
+        require_confirmation_for_confirmed_action_updates=_parse_bool(
+            raw_security.get("require_confirmation_for_confirmed_action_updates", True),
+            "security.require_confirmation_for_confirmed_action_updates",
+        ),
+    )
+    if policy.allow_remote_transport:
+        raise ConfigError("Remote transport is not supported in v1.0")
+    if policy.allow_bulk_operations:
+        raise ConfigError("Bulk operations are not supported in v1.0")
+    if policy.allow_delete_operations:
+        raise ConfigError("Delete operations are frozen in v1.0")
+    if not policy.require_confirmation_for_completed_actions:
+        raise ConfigError("Completed action records must require user confirmation")
+    if not policy.require_confirmation_for_confirmed_action_updates:
+        raise ConfigError("Confirmed action updates must require user confirmation")
+    return policy
+
+
+def _parse_bool(raw_value: object, field_name: str) -> bool:
+    if not isinstance(raw_value, bool):
+        raise ConfigError(f"{field_name} must be a boolean")
+    return raw_value
 
 
 def _parse_calendar_sources(raw_sources: object) -> tuple[CalendarSource, ...]:

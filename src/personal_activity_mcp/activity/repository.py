@@ -15,6 +15,7 @@ from personal_activity_mcp.activity.models import (
 from personal_activity_mcp.calendar import CalendarEnsureRecord, CalendarEventRecord
 from personal_activity_mcp.config import AppConfig, CalendarSource
 from personal_activity_mcp.sidecar import SidecarRepository
+from personal_activity_mcp.time_policy import Clock, SystemClock, require_aware_datetime
 
 
 class ActivityCalendarBackend(Protocol):
@@ -46,11 +47,14 @@ class ActivityRepository:
         config: AppConfig,
         backend: ActivityCalendarBackend,
         sidecar: SidecarRepository,
+        *,
+        clock: Clock | None = None,
     ) -> None:
         self._calendar_sources = {source.calendar_id: source for source in config.calendar_sources}
         self._default_activity_log_calendar_id = config.default_activity_log_calendar_id
         self._backend = backend
         self._sidecar = sidecar
+        self._clock = clock or SystemClock()
 
     def ensure_log_calendar(
         self,
@@ -123,9 +127,13 @@ class ActivityRepository:
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must be a non-empty string")
         _validate_timezone(timezone)
+        require_aware_datetime(start, "start")
+        require_aware_datetime(end, "end")
         if start >= end:
             raise ValueError("start must be before end")
-        if end.astimezone(UTC) > datetime.now(UTC):
+        now = self._clock.now()
+        require_aware_datetime(now, "clock.now()")
+        if end.astimezone(UTC) > now.astimezone(UTC):
             raise ValueError("completed actions must end in the past")
 
         request_hash = _request_hash(

@@ -125,7 +125,19 @@ def _record_from_payload(row: Any) -> ReminderRecord:
     )
 
 
-_LIST_REMINDERS_JXA = r"""
+_LOCAL_DATE_FORMATTER_JXA = r"""
+function formatLocalDate(value) {
+  const year = value.getFullYear();
+  const month = ("0" + (value.getMonth() + 1)).slice(-2);
+  const day = ("0" + value.getDate()).slice(-2);
+  return year + "-" + month + "-" + day;
+}
+"""
+
+
+_LIST_REMINDERS_JXA = (
+    _LOCAL_DATE_FORMATTER_JXA
+    + r"""
 function run(argv) {
   const listIds = argv[0].split("\n").filter(Boolean);
   const startDue = argv[1] ? new Date(argv[1] + "T00:00:00") : null;
@@ -156,7 +168,7 @@ function run(argv) {
         list_id: listName,
         title: reminder.name(),
         notes: includeNotes ? reminder.body() : null,
-        due_date: due ? due.toISOString().slice(0, 10) : null,
+        due_date: due ? formatLocalDate(due) : null,
         priority: reminder.priority(),
         is_completed: completed,
         completion_date: reminder.completionDate() ? reminder.completionDate().toISOString() : null
@@ -166,9 +178,12 @@ function run(argv) {
   return JSON.stringify(rows);
 }
 """
+)
 
 
-_CREATE_REMINDER_JXA = r"""
+_CREATE_REMINDER_JXA = (
+    _LOCAL_DATE_FORMATTER_JXA
+    + r"""
 function run(argv) {
   const listId = argv[0];
   const title = argv[1];
@@ -189,16 +204,19 @@ function run(argv) {
     list_id: listId,
     title: reminder.name(),
     notes: notes,
-    due_date: dueDate ? dueDate.toISOString().slice(0, 10) : null,
+    due_date: dueDate ? formatLocalDate(dueDate) : null,
     priority: reminder.priority(),
     is_completed: reminder.completed(),
     completion_date: null
   });
 }
 """
+)
 
 
-_COMPLETE_REMINDER_JXA = r"""
+_COMPLETE_REMINDER_JXA = (
+    _LOCAL_DATE_FORMATTER_JXA
+    + r"""
 function run(argv) {
   const reminderId = argv[0];
   const listIds = argv[1].split("\n").filter(Boolean);
@@ -219,7 +237,7 @@ function run(argv) {
           list_id: listName,
           title: reminder.name(),
           notes: null,
-          due_date: due ? due.toISOString().slice(0, 10) : null,
+          due_date: due ? formatLocalDate(due) : null,
           priority: reminder.priority(),
           is_completed: reminder.completed(),
           completion_date: completionDate.toISOString()
@@ -230,3 +248,4 @@ function run(argv) {
   throw new Error("Reminder not found in configured lists");
 }
 """
+)

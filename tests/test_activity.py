@@ -9,6 +9,14 @@ from personal_activity_mcp.config import AppConfig, CalendarSource, JournalSourc
 from personal_activity_mcp.sidecar import SidecarRepository
 
 
+class FixedClock:
+    def __init__(self, current: datetime) -> None:
+        self._current = current
+
+    def now(self) -> datetime:
+        return self._current
+
+
 class FakeActivityCalendarBackend:
     def __init__(self) -> None:
         self.ensure_calls: list[dict[str, object]] = []
@@ -221,6 +229,70 @@ def test_record_completed_action_writes_action_record_once(tmp_path: Path) -> No
     assert audit["confirmed_by_user"] == 1
     assert provenance["target_item_id"] == created.action_record_id
     assert provenance["relation_type"] == "created_from"
+
+
+def test_record_completed_action_uses_injected_clock(tmp_path: Path) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeActivityCalendarBackend()
+    repository = ActivityRepository(
+        make_config(tmp_path),
+        backend,
+        sidecar,
+        clock=FixedClock(datetime(2030, 1, 1, 12, tzinfo=UTC)),
+    )
+
+    result = repository.record_completed_action(
+        calendar_id="Personal Activity Log",
+        title="Future relative to the host clock",
+        start=datetime(2030, 1, 1, 10, tzinfo=UTC),
+        end=datetime(2030, 1, 1, 11, tzinfo=UTC),
+        is_all_day=False,
+        category=None,
+        project=None,
+        notes=None,
+        location=None,
+        timezone="UTC",
+        provenance_ids=[],
+        confirmed_by_user=True,
+        idempotency_key="activity:record:fixed-clock",
+    )
+
+    assert result.created is True
+    assert len(backend.create_calls) == 1
+
+
+def test_record_completed_action_rejects_naive_datetime_before_backend(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeActivityCalendarBackend()
+    repository = ActivityRepository(
+        make_config(tmp_path),
+        backend,
+        sidecar,
+        clock=FixedClock(datetime(2026, 7, 8, 12, tzinfo=UTC)),
+    )
+
+    with pytest.raises(ValueError, match="start must include timezone information"):
+        repository.record_completed_action(
+            calendar_id="Personal Activity Log",
+            title="Naive datetime",
+            start=datetime(2026, 7, 8, 10),
+            end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+            is_all_day=False,
+            category=None,
+            project=None,
+            notes=None,
+            location=None,
+            timezone="Asia/Shanghai",
+            provenance_ids=[],
+            confirmed_by_user=True,
+            idempotency_key="activity:record:naive",
+        )
+
+    assert backend.create_calls == []
 
 
 def test_record_completed_action_rejects_non_activity_log_calendar(tmp_path: Path) -> None:

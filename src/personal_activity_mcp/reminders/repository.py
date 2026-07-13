@@ -17,6 +17,7 @@ from personal_activity_mcp.reminders.models import (
     ReminderTimeRange,
 )
 from personal_activity_mcp.sidecar import SidecarRepository
+from personal_activity_mcp.time_policy import require_aware_datetime
 
 
 class ReminderBackend(Protocol):
@@ -214,23 +215,26 @@ class ReminderRepository:
         completion_date: datetime,
         confirmed_by_user: bool,
         idempotency_key: str,
+        list_id: str | None = None,
     ) -> ReminderCompleteResult:
         """Mark an allowed Reminder as completed."""
         if not confirmed_by_user:
             raise ValueError("confirmed_by_user is required")
+        require_aware_datetime(completion_date, "completion_date")
+        list_ids = self._select_write_list_ids(list_id)
         if self._sidecar is None:
             raise ValueError("sidecar is required for reminders.complete_reminder")
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must be a non-empty string")
 
-        list_ids = list(self._reminder_sources)
-        request_hash = _request_hash(
-            {
-                "reminder_id": reminder_id,
-                "completion_date": completion_date.isoformat(),
-                "confirmed_by_user": confirmed_by_user,
-            }
-        )
+        request_payload: dict[str, object] = {
+            "reminder_id": reminder_id,
+            "completion_date": completion_date.isoformat(),
+            "confirmed_by_user": confirmed_by_user,
+        }
+        if list_id is not None:
+            request_payload["list_id"] = list_id
+        request_hash = _request_hash(request_payload)
         decision = self._sidecar.check_idempotency_key(
             key=idempotency_key,
             operation="reminders.complete_reminder",
@@ -263,8 +267,8 @@ class ReminderRepository:
             list_ids=list_ids,
             completion_date=completion_date,
         )
-        if record.list_id not in self._reminder_sources:
-            raise ValueError(f"Reminder is not in an allowed list: {record.list_id}")
+        if record.list_id not in list_ids:
+            raise ValueError(f"Reminder is not in a write-enabled list: {record.list_id}")
         stable_id = _stable_completed_reminder_item_id(record.list_id, reminder_id)
         self._sidecar.upsert_mcp_item(
             item_id=stable_id,
@@ -298,6 +302,22 @@ class ReminderRepository:
             status_semantics="confirmed",
             audit_id=audit_id,
         )
+
+    def _select_write_list_ids(self, list_id: str | None) -> list[str]:
+        if list_id is not None:
+            source = self._reminder_sources.get(list_id)
+            if source is None:
+                raise ValueError(f"Unknown reminder list_ids: {list_id}")
+            if not source.allow_write:
+                raise ValueError(f"Reminder list is not allowed for writes: {list_id}")
+            return [list_id]
+
+        list_ids = [
+            source.list_id for source in self._reminder_sources.values() if source.allow_write
+        ]
+        if not list_ids:
+            raise ValueError("No reminder lists are allowed for writes")
+        return list_ids
 
     def _select_list_ids(self, list_ids: list[str] | None) -> list[str]:
         if list_ids is None:

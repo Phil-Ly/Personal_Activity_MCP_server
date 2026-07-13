@@ -309,7 +309,7 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
     assert backend.complete_calls == [
         {
             "reminder_id": "reminder-1",
-            "list_ids": ["Personal", "Work"],
+            "list_ids": ["Personal"],
             "completion_date": completion_date,
         }
     ]
@@ -328,3 +328,46 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
     assert audit["operation"] == "reminders.complete_reminder"
     assert audit["confirmed_by_user"] == 1
     assert idempotency["key"] == "reminder:complete:demo"
+
+
+def test_complete_reminder_rejects_read_only_target_before_backend(tmp_path: Path) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeReminderBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(
+        ValueError,
+        match="Reminder list is not allowed for writes: Work",
+    ):
+        repository.complete_reminder(
+            reminder_id="reminder-1",
+            list_id="Work",
+            completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
+            confirmed_by_user=True,
+            idempotency_key="reminder:complete:read-only",
+        )
+
+    assert backend.complete_calls == []
+
+
+def test_complete_reminder_rejects_naive_completion_date_before_backend(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeReminderBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(
+        ValueError,
+        match="completion_date must include timezone information",
+    ):
+        repository.complete_reminder(
+            reminder_id="reminder-1",
+            completion_date=datetime(2026, 7, 9, 12),
+            confirmed_by_user=True,
+            idempotency_key="reminder:complete:naive",
+        )
+
+    assert backend.complete_calls == []

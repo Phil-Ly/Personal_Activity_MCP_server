@@ -8,6 +8,14 @@ from personal_activity_mcp.config import AppConfig, CalendarSource, JournalSourc
 from personal_activity_mcp.sidecar import SidecarRepository
 
 
+class FixedClock:
+    def __init__(self, current: datetime) -> None:
+        self._current = current
+
+    def now(self) -> datetime:
+        return self._current
+
+
 class FakeCalendarBackend:
     def __init__(self, events: list[CalendarEventRecord] | None = None) -> None:
         self.events = events or []
@@ -155,7 +163,11 @@ def test_list_events_queries_only_allowed_calendars_without_notes_by_default(
         notes="Private notes",
     )
     backend = FakeCalendarBackend([event])
-    repository = CalendarRepository(make_config(tmp_path), backend)
+    repository = CalendarRepository(
+        make_config(tmp_path),
+        backend,
+        clock=FixedClock(datetime(2026, 7, 8, 9, tzinfo=UTC)),
+    )
 
     result = repository.list_events(
         calendar_ids=["Personal"],
@@ -195,6 +207,20 @@ def test_list_events_rejects_unconfigured_calendar(tmp_path: Path) -> None:
             start=datetime(2026, 7, 8, 9, tzinfo=UTC),
             end=datetime(2026, 7, 8, 18, tzinfo=UTC),
         )
+
+
+def test_list_events_rejects_naive_datetime_before_backend(tmp_path: Path) -> None:
+    backend = FakeCalendarBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend)
+
+    with pytest.raises(ValueError, match="start must include timezone information"):
+        repository.list_events(
+            calendar_ids=["Personal"],
+            start=datetime(2026, 7, 8, 9),
+            end=datetime(2026, 7, 8, 18, tzinfo=UTC),
+        )
+
+    assert backend.list_calls == []
 
 
 def test_list_events_uses_sidecar_semantics_for_mcp_created_events(
@@ -323,6 +349,29 @@ def test_create_event_rejects_calendar_without_write_permission(tmp_path: Path) 
         )
 
 
+def test_create_event_rejects_naive_datetime_before_backend(tmp_path: Path) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeCalendarBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ValueError, match="start must include timezone information"):
+        repository.create_event(
+            calendar_id="Personal",
+            title="MCP demo",
+            start=datetime(2026, 7, 8, 10),
+            end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+            is_all_day=False,
+            notes=None,
+            location=None,
+            timezone="Asia/Shanghai",
+            provenance_ids=[],
+            idempotency_key="calendar:create:naive",
+        )
+
+    assert backend.create_calls == []
+
+
 def test_create_event_rejects_idempotency_conflict(tmp_path: Path) -> None:
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
     sidecar.initialize()
@@ -415,6 +464,31 @@ def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -
     assert item["status_semantics"] == "planned"
     assert audit["target_item_id"] == updated.stable_id
     assert audit["confirmed_by_user"] == 0
+
+
+def test_update_event_rejects_naive_datetime_before_backend(tmp_path: Path) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeCalendarBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ValueError, match="start must include timezone information"):
+        repository.update_event(
+            calendar_id="Personal",
+            event_id="event-1",
+            title=None,
+            start=datetime(2026, 7, 8, 12),
+            end=datetime(2026, 7, 8, 13, tzinfo=UTC),
+            is_all_day=None,
+            notes=None,
+            location=None,
+            timezone="Asia/Shanghai",
+            provenance_ids=[],
+            confirmed_by_user=False,
+            idempotency_key="calendar:update:naive",
+        )
+
+    assert backend.update_calls == []
 
 
 def test_update_confirmed_action_requires_user_confirmation(tmp_path: Path) -> None:

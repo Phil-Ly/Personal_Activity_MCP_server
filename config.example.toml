@@ -8,6 +8,24 @@ sidecar_path = "/Users/your-name/.local/share/personal-activity-mcp/personal_act
 default_timezone = "Asia/Shanghai"
 default_activity_log_calendar_id = "Personal Activity Log"
 
+[privacy]
+# Sensitive logging is disabled by default. Keep all detail flags false unless
+# you deliberately want logs to include private source content.
+sensitive_logging_enabled = false
+log_journal_content = false
+log_calendar_notes = false
+log_reminder_notes = false
+log_llm_outputs = false
+
+[security]
+# v1.0 is local-stdio only. These options document the active safety policy;
+# enabling remote, bulk, or delete operations is rejected by the config loader.
+allow_remote_transport = false
+allow_bulk_operations = false
+allow_delete_operations = false
+require_confirmation_for_completed_actions = true
+require_confirmation_for_confirmed_action_updates = true
+
 [[journal_sources]]
 source_id = "daily"
 path = "/Users/your-name/Documents/Journal"

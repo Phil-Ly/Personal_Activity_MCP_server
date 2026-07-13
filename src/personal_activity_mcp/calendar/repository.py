@@ -18,6 +18,7 @@ from personal_activity_mcp.calendar.models import (
 )
 from personal_activity_mcp.config import AppConfig
 from personal_activity_mcp.sidecar import SidecarRepository
+from personal_activity_mcp.time_policy import Clock, SystemClock, require_aware_datetime
 
 
 class CalendarBackend(Protocol):
@@ -69,10 +70,13 @@ class CalendarRepository:
         config: AppConfig,
         backend: CalendarBackend,
         sidecar: SidecarRepository | None = None,
+        *,
+        clock: Clock | None = None,
     ) -> None:
         self._calendar_sources = {source.calendar_id: source for source in config.calendar_sources}
         self._backend = backend
         self._sidecar = sidecar
+        self._clock = clock or SystemClock()
 
     def list_events(
         self,
@@ -84,6 +88,8 @@ class CalendarRepository:
         include_location: bool = False,
     ) -> CalendarListResult:
         """List event evidence from explicitly configured Calendars."""
+        require_aware_datetime(start, "start")
+        require_aware_datetime(end, "end")
         if start >= end:
             raise ValueError("start must be before end")
         selected_calendar_ids = self._select_calendar_ids(calendar_ids)
@@ -94,11 +100,14 @@ class CalendarRepository:
             include_notes=include_notes,
             include_location=include_location,
         )
+        now = self._clock.now()
+        require_aware_datetime(now, "clock.now()")
         events = [
             self._to_evidence(
                 record,
                 include_notes=include_notes,
                 include_location=include_location,
+                now=now,
             )
             for record in records
             if record.calendar_id in self._calendar_sources
@@ -133,6 +142,8 @@ class CalendarRepository:
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must be a non-empty string")
         _validate_timezone(timezone)
+        require_aware_datetime(start, "start")
+        require_aware_datetime(end, "end")
         if start >= end:
             raise ValueError("start must be before end")
 
@@ -254,6 +265,10 @@ class CalendarRepository:
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must be a non-empty string")
         _validate_timezone(timezone)
+        if start is not None:
+            require_aware_datetime(start, "start")
+        if end is not None:
+            require_aware_datetime(end, "end")
         if start is not None and end is not None and start >= end:
             raise ValueError("start must be before end")
 
@@ -409,6 +424,7 @@ class CalendarRepository:
         *,
         include_notes: bool,
         include_location: bool,
+        now: datetime,
     ) -> CalendarEventEvidence:
         sidecar_item = None
         provenance_ids: list[str] = []
@@ -419,7 +435,7 @@ class CalendarRepository:
             )
             if sidecar_item is not None:
                 provenance_ids = self._sidecar.list_provenance_ids(str(sidecar_item["id"]))
-        status_semantics = _status_semantics(record, sidecar_item)
+        status_semantics = _status_semantics(record, sidecar_item, now=now)
         return CalendarEventEvidence(
             evidence_id=_calendar_evidence_id(record.calendar_id, record.event_id),
             source_id=record.calendar_id,
@@ -467,10 +483,13 @@ def _calendar_evidence_id(calendar_id: str, event_id: str) -> str:
 def _status_semantics(
     record: CalendarEventRecord,
     sidecar_item: dict[str, object] | None,
+    *,
+    now: datetime,
 ):
     if sidecar_item is not None and sidecar_item["status_semantics"]:
         return sidecar_item["status_semantics"]
-    return "probable" if record.end.astimezone(UTC) < datetime.now(UTC) else "planned"
+    require_aware_datetime(record.end, "record.end")
+    return "probable" if record.end.astimezone(UTC) < now.astimezone(UTC) else "planned"
 
 
 def _sidecar_status_semantics(sidecar_item: dict[str, object]) -> str:

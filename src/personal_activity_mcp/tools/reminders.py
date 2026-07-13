@@ -69,10 +69,12 @@ def register_reminder_tools(server: FastMCP, repository: ReminderRepository) -> 
         completion_date: datetime,
         confirmed_by_user: bool,
         idempotency_key: str,
+        list_id: str | None = None,
     ) -> ReminderCompleteResult:
         return repository.complete_reminder(
             reminder_id=reminder_id,
             completion_date=completion_date,
             confirmed_by_user=confirmed_by_user,
             idempotency_key=idempotency_key,
+            list_id=list_id,
         )
