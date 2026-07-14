@@ -1,10 +1,10 @@
 # Copy this file outside the repository or to a local ignored path.
 # Every source grants read access only to the configured directory tree.
 
-# Optional. Defaults to "personal_activity.sqlite3" next to this config file.
+# Optional. The loader uses this same repository-external path when omitted.
 # The sidecar stores local metadata, idempotency records, provenance links,
 # and operation audit rows. It must not store journal bodies or LLM summaries.
-sidecar_path = "/Users/your-name/.local/share/personal-activity-mcp/personal_activity.sqlite3"
+sidecar_path = "~/Library/Application Support/personal-activity-mcp/personal_activity.sqlite3"
 default_timezone = "Asia/Shanghai"
 default_activity_log_calendar_id = "Personal Activity Log"
 

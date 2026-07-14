@@ -7,6 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+DEFAULT_SIDECAR_PATH = (
+    Path.home()
+    / "Library"
+    / "Application Support"
+    / "personal-activity-mcp"
+    / "personal_activity.sqlite3"
+).resolve()
+
 
 class ConfigError(ValueError):
     """Raised when local configuration is missing or invalid."""
@@ -66,7 +74,7 @@ class AppConfig:
     """Validated application configuration."""
 
     journal_sources: tuple[JournalSource, ...]
-    sidecar_path: Path = Path(":memory:")
+    sidecar_path: Path = DEFAULT_SIDECAR_PATH
     calendar_sources: tuple[CalendarSource, ...] = ()
     reminder_sources: tuple[ReminderSource, ...] = ()
     default_activity_log_calendar_id: str = "Personal Activity Log"
@@ -101,7 +109,7 @@ def load_config(config_path: Path) -> AppConfig:
 
     return AppConfig(
         journal_sources=tuple(sources),
-        sidecar_path=_parse_sidecar_path(raw.get("sidecar_path"), path.parent),
+        sidecar_path=_parse_sidecar_path(raw.get("sidecar_path")),
         calendar_sources=_parse_calendar_sources(raw.get("calendar_sources")),
         reminder_sources=_parse_reminder_sources(raw.get("reminder_sources")),
         default_activity_log_calendar_id=_parse_default_activity_log_calendar_id(
@@ -113,9 +121,9 @@ def load_config(config_path: Path) -> AppConfig:
     )
 
 
-def _parse_sidecar_path(raw_path: object, config_dir: Path) -> Path:
+def _parse_sidecar_path(raw_path: object) -> Path:
     if raw_path is None:
-        return (config_dir / "personal_activity.sqlite3").resolve()
+        return DEFAULT_SIDECAR_PATH
     if not isinstance(raw_path, str) or not raw_path.strip():
         raise ConfigError("sidecar_path must be a non-empty string")
     return Path(raw_path).expanduser().resolve()

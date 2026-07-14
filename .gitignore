@@ -76,6 +76,27 @@ service-account*.json
 *.secret
 *.secrets
 
+# Local application configuration and persistent state
+config.toml
+config.*.toml
+!config.example.toml
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db3
+*.db-journal
+*.db-wal
+*.db-shm
+*.db3-journal
+*.db3-wal
+*.db3-shm
+
 # Python environments and build artifacts
 .venv/
 __pycache__/
@@ -87,3 +108,6 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Tool-generated analysis artifacts
+.understand-anything/

@@ -6,8 +6,11 @@ from personal_activity_mcp.server import create_server
 
 
 def write_config(config_path: Path, journal_path: Path) -> None:
+    sidecar_path = config_path.parent / "sidecar.sqlite3"
     config_path.write_text(
         f"""
+sidecar_path = "{sidecar_path}"
+
 [[journal_sources]]
 source_id = "daily"
 path = "{journal_path}"

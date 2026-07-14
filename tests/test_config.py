@@ -28,7 +28,16 @@ def test_load_config_accepts_an_explicit_journal_directory(tmp_path: Path) -> No
     assert config.journal_sources[0].source_id == "daily"
     assert config.journal_sources[0].path == journal_path.resolve()
     assert config.journal_sources[0].extensions == (".md", ".txt")
-    assert config.sidecar_path == (config_path.parent / "personal_activity.sqlite3").resolve()
+    assert (
+        config.sidecar_path
+        == (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "personal-activity-mcp"
+            / "personal_activity.sqlite3"
+        ).resolve()
+    )
 
 
 def test_load_config_accepts_explicit_sidecar_path(tmp_path: Path) -> None:

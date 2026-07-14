@@ -10,8 +10,11 @@ def test_real_stdio_session_lists_and_calls_journal_capabilities(tmp_path: Path)
     journal_path.mkdir()
     (journal_path / "2026-07-03.md").write_text("stdio content", encoding="utf-8")
     config_path = tmp_path / "config.toml"
+    sidecar_path = tmp_path / "sidecar.sqlite3"
     config_path.write_text(
         f"""
+sidecar_path = "{sidecar_path}"
+
 [[journal_sources]]
 source_id = "daily"
 path = "{journal_path}"
