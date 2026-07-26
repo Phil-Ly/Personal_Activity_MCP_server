@@ -126,7 +126,7 @@ class CalendarRepository:
         notes: str | None,
         location: str | None,
         timezone: str,
-        provenance_ids: list[str],
+        source_refs: list[str],
         idempotency_key: str,
     ) -> CalendarCreateResult:
         """Create a Calendar event with allowlist, idempotency, and audit controls."""
@@ -157,7 +157,7 @@ class CalendarRepository:
                 "notes": notes,
                 "location": location,
                 "timezone": timezone,
-                "provenance_ids": provenance_ids,
+                "source_refs": source_refs,
             }
         )
         decision = self._sidecar.check_idempotency_key(
@@ -178,7 +178,7 @@ class CalendarRepository:
                 created=False,
                 deduplicated=True,
                 status_semantics="planned",
-                provenance_ids=provenance_ids,
+                source_refs=source_refs,
             )
 
         record = self._backend.create_event(
@@ -203,11 +203,10 @@ class CalendarRepository:
             status_semantics="planned",
             created_by_mcp=True,
         )
-        for provenance_id in provenance_ids:
-            self._sidecar.record_provenance_link(
+        for source_ref in source_refs:
+            self._sidecar.record_source_link(
                 target_item_id=stable_id,
-                evidence_type=_evidence_type_from_id(provenance_id),
-                evidence_id=provenance_id,
+                source_ref=source_ref,
                 relation_type="created_from",
             )
         self._sidecar.record_idempotency_success(
@@ -231,7 +230,7 @@ class CalendarRepository:
             created=True,
             deduplicated=False,
             status_semantics="planned",
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
         )
 
     def update_event(
@@ -246,7 +245,7 @@ class CalendarRepository:
         notes: str | None,
         location: str | None,
         timezone: str,
-        provenance_ids: list[str],
+        source_refs: list[str],
         confirmed_by_user: bool,
         idempotency_key: str,
     ) -> CalendarUpdateResult:
@@ -316,7 +315,7 @@ class CalendarRepository:
                 "notes": notes,
                 "location": location,
                 "timezone": timezone,
-                "provenance_ids": provenance_ids,
+                "source_refs": source_refs,
                 "confirmed_by_user": confirmed_by_user,
             }
         )
@@ -340,7 +339,7 @@ class CalendarRepository:
                 updated_fields=updated_fields,
                 requires_user_confirmation=False,
                 status_semantics=_sidecar_status_semantics(item),
-                provenance_ids=provenance_ids,
+                source_refs=source_refs,
                 audit_id=None,
             )
 
@@ -376,11 +375,10 @@ class CalendarRepository:
             status_semantics=status_semantics,
             created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
         )
-        for provenance_id in provenance_ids:
-            self._sidecar.record_provenance_link(
+        for source_ref in source_refs:
+            self._sidecar.record_source_link(
                 target_item_id=stable_id,
-                evidence_type=_evidence_type_from_id(provenance_id),
-                evidence_id=provenance_id,
+                source_ref=source_ref,
                 relation_type="updated_from",
             )
         self._sidecar.record_idempotency_success(
@@ -406,7 +404,7 @@ class CalendarRepository:
             updated_fields=updated_fields,
             requires_user_confirmation=False,
             status_semantics=status_semantics,
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
             audit_id=audit_id,
         )
 
@@ -427,14 +425,14 @@ class CalendarRepository:
         now: datetime,
     ) -> CalendarEventEvidence:
         sidecar_item = None
-        provenance_ids: list[str] = []
+        source_refs: list[str] = []
         if self._sidecar is not None:
             sidecar_item = self._sidecar_item_for_calendar_event(
                 external_id=record.event_id,
                 external_calendar_or_list_id=record.calendar_id,
             )
             if sidecar_item is not None:
-                provenance_ids = self._sidecar.list_provenance_ids(str(sidecar_item["id"]))
+                source_refs = self._sidecar.list_source_refs(str(sidecar_item["id"]))
         status_semantics = _status_semantics(record, sidecar_item, now=now)
         return CalendarEventEvidence(
             evidence_id=_calendar_evidence_id(record.calendar_id, record.event_id),
@@ -450,7 +448,7 @@ class CalendarRepository:
             notes=record.notes if include_notes else None,
             created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
             status_semantics=status_semantics,
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
         )
 
     def _sidecar_item_for_calendar_event(
@@ -550,13 +548,3 @@ def _validate_timezone(timezone: str) -> None:
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError as error:
         raise ValueError(f"Unknown timezone: {timezone}") from error
-
-
-def _evidence_type_from_id(evidence_id: str):
-    if evidence_id.startswith("journal:"):
-        return "journal_entry"
-    if evidence_id.startswith("calendar:") or evidence_id.startswith("calendar_event:"):
-        return "calendar_event"
-    if evidence_id.startswith("reminder:"):
-        return "reminder"
-    raise ValueError(f"Unsupported provenance id: {evidence_id}")

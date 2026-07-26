@@ -25,5 +25,5 @@ class ActivityRecordResult(BaseModel):
     status_semantics: Literal["confirmed"]
     created: bool
     deduplicated: bool
-    provenance_ids: list[str]
+    source_refs: list[str]
     audit_id: str | None

@@ -99,7 +99,7 @@ class ActivityRepository:
         notes: str | None,
         location: str | None,
         timezone: str,
-        provenance_ids: list[str],
+        source_refs: list[str],
         confirmed_by_user: bool,
         idempotency_key: str,
     ) -> ActivityRecordResult:
@@ -148,7 +148,7 @@ class ActivityRepository:
                 "notes": notes,
                 "location": location,
                 "timezone": timezone,
-                "provenance_ids": provenance_ids,
+                "source_refs": source_refs,
                 "confirmed_by_user": confirmed_by_user,
             }
         )
@@ -170,7 +170,7 @@ class ActivityRepository:
                 status_semantics="confirmed",
                 created=False,
                 deduplicated=True,
-                provenance_ids=provenance_ids,
+                source_refs=source_refs,
                 audit_id=None,
             )
 
@@ -196,11 +196,10 @@ class ActivityRepository:
             status_semantics="confirmed",
             created_by_mcp=True,
         )
-        for provenance_id in provenance_ids:
-            self._sidecar.record_provenance_link(
+        for source_ref in source_refs:
+            self._sidecar.record_source_link(
                 target_item_id=stable_id,
-                evidence_type=_evidence_type_from_id(provenance_id),
-                evidence_id=provenance_id,
+                source_ref=source_ref,
                 relation_type="created_from",
             )
         self._sidecar.record_idempotency_success(
@@ -224,7 +223,7 @@ class ActivityRepository:
             status_semantics="confirmed",
             created=True,
             deduplicated=False,
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
             audit_id=audit_id,
         )
 
@@ -256,13 +255,3 @@ def _validate_timezone(timezone: str) -> None:
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError as error:
         raise ValueError(f"Unknown timezone: {timezone}") from error
-
-
-def _evidence_type_from_id(evidence_id: str):
-    if evidence_id.startswith("journal:"):
-        return "journal_entry"
-    if evidence_id.startswith("calendar:") or evidence_id.startswith("calendar_event:"):
-        return "calendar_event"
-    if evidence_id.startswith("reminder:"):
-        return "reminder"
-    raise ValueError(f"Unsupported provenance id: {evidence_id}")

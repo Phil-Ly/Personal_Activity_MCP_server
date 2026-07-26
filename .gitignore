@@ -45,6 +45,9 @@ ADRS.md
 EVALUATION.md
 EVALS.md
 
+# Local editable diagrams
+personal-activity-core-business-flow.drawio
+
 # Environment files and secrets
 .env
 .env.*

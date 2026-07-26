@@ -44,7 +44,7 @@ def register_activity_tools(server: FastMCP, repository: ActivityRepository) -> 
         notes: str | None,
         location: str | None,
         timezone: str,
-        provenance_ids: list[str],
+        source_refs: list[str],
         confirmed_by_user: bool,
         idempotency_key: str,
     ) -> ActivityRecordResult:
@@ -59,7 +59,7 @@ def register_activity_tools(server: FastMCP, repository: ActivityRepository) -> 
             notes=notes,
             location=location,
             timezone=timezone,
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
             confirmed_by_user=confirmed_by_user,
             idempotency_key=idempotency_key,
         )

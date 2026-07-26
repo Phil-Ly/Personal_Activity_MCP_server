@@ -1,5 +1,3 @@
-import json
-import sqlite3
 from pathlib import Path
 
 import anyio
@@ -200,45 +198,16 @@ class FakeReminderBackend:
         )
 
 
-def write_config(config_path: Path, journal_path: Path) -> None:
+def write_config(config_path: Path) -> None:
     sidecar_path = config_path.parent / "sidecar.sqlite3"
-    config_path.write_text(
-        f"""
-sidecar_path = "{sidecar_path}"
-
-[[journal_sources]]
-source_id = "daily"
-path = "{journal_path}"
-extensions = [".md", ".txt"]
-""".strip(),
-        encoding="utf-8",
-    )
+    config_path.write_text(f'sidecar_path = "{sidecar_path}"', encoding="utf-8")
 
 
-def write_config_with_sidecar(config_path: Path, journal_path: Path, sidecar_path: Path) -> None:
-    config_path.write_text(
-        f"""
-sidecar_path = "{sidecar_path}"
-
-[[journal_sources]]
-source_id = "daily"
-path = "{journal_path}"
-extensions = [".md", ".txt"]
-""".strip(),
-        encoding="utf-8",
-    )
-
-
-def write_config_with_calendar(config_path: Path, journal_path: Path, sidecar_path: Path) -> None:
+def write_config_with_calendar(config_path: Path, sidecar_path: Path) -> None:
     config_path.write_text(
         f"""
 sidecar_path = "{sidecar_path}"
 default_timezone = "Asia/Shanghai"
-
-[[journal_sources]]
-source_id = "daily"
-path = "{journal_path}"
-extensions = [".md", ".txt"]
 
 [[calendar_sources]]
 calendar_id = "Personal"
@@ -254,15 +223,10 @@ allow_write = true
     )
 
 
-def write_config_with_reminders(config_path: Path, journal_path: Path, sidecar_path: Path) -> None:
+def write_config_with_reminders(config_path: Path, sidecar_path: Path) -> None:
     config_path.write_text(
         f"""
 sidecar_path = "{sidecar_path}"
-
-[[journal_sources]]
-source_id = "daily"
-path = "{journal_path}"
-extensions = [".md", ".txt"]
 
 [[reminder_sources]]
 list_id = "Personal"
@@ -273,19 +237,15 @@ allow_write = true
     )
 
 
-def test_server_exposes_journal_tool_and_resource_template(tmp_path: Path) -> None:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
+def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
-    write_config(config_path, journal_path)
+    write_config(config_path)
     server = create_server(config_path)
 
     tools = anyio.run(server.list_tools)
     templates = anyio.run(server.list_resource_templates)
 
     assert [tool.name for tool in tools] == [
-        "journal.list_entries",
-        "journal.search_entries",
         "calendar.list_events",
         "calendar.create_event",
         "calendar.update_event",
@@ -296,90 +256,13 @@ def test_server_exposes_journal_tool_and_resource_template(tmp_path: Path) -> No
         "reminders.complete_reminder",
     ]
     assert "reminders.delete_reminder" not in [tool.name for tool in tools]
-    assert str(templates[0].uriTemplate) == "journal://{source_id}/{entry_id}"
-
-
-def test_server_tool_and_resource_form_an_end_to_end_read_path(tmp_path: Path) -> None:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
-    (journal_path / "2026-07-03.md").write_text("Local-only content", encoding="utf-8")
-    config_path = tmp_path / "config.toml"
-    write_config(config_path, journal_path)
-    server = create_server(config_path)
-
-    _, structured_result = anyio.run(
-        server.call_tool,
-        "journal.list_entries",
-        {"start_date": "2026-07-03", "end_date": "2026-07-03"},
-    )
-    resource_uri = structured_result["entries"][0]["resource_uri"]
-    resource_result = list(anyio.run(server.read_resource, resource_uri))[0]
-    resource = json.loads(resource_result.content)
-
-    assert resource["resource_uri"] == resource_uri
-    assert resource["content"] == "Local-only content"
-
-
-def test_server_records_journal_metadata_in_sidecar_without_body(
-    tmp_path: Path,
-) -> None:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
-    (journal_path / "2026-07-03.md").write_text(
-        "Local-only sidecar body",
-        encoding="utf-8",
-    )
-    sidecar_path = tmp_path / "state" / "activity.sqlite3"
-    config_path = tmp_path / "config.toml"
-    write_config_with_sidecar(config_path, journal_path, sidecar_path)
-    server = create_server(config_path)
-
-    _, structured_result = anyio.run(
-        server.call_tool,
-        "journal.list_entries",
-        {"start_date": "2026-07-03", "end_date": "2026-07-03"},
-    )
-    evidence_id = structured_result["entries"][0]["evidence_id"]
-
-    with sqlite3.connect(sidecar_path) as connection:
-        connection.row_factory = sqlite3.Row
-        row = connection.execute("SELECT * FROM journal_entry").fetchone()
-
-    assert row["id"] == evidence_id
-    assert row["source_id"] == "journal:daily"
-    assert row["entry_date"] == "2026-07-03"
-    assert "Local-only sidecar body" not in " ".join(str(value) for value in row)
-
-
-def test_server_search_tool_returns_structured_keyword_hits(tmp_path: Path) -> None:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
-    (journal_path / "2026-07-03.md").write_text("Local MCP search", encoding="utf-8")
-    config_path = tmp_path / "config.toml"
-    write_config(config_path, journal_path)
-    server = create_server(config_path)
-
-    _, structured_result = anyio.run(
-        server.call_tool,
-        "journal.search_entries",
-        {
-            "query": "mcp",
-            "start_date": "2026-07-03",
-            "end_date": "2026-07-03",
-            "include_snippets": True,
-        },
-    )
-
-    assert structured_result["entries"][0]["matched_terms"] == ["mcp"]
-    assert structured_result["entries"][0]["snippets"] == ["Local MCP search"]
+    assert templates == []
 
 
 def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path) -> None:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
     sidecar_path = tmp_path / "state" / "activity.sqlite3"
     config_path = tmp_path / "config.toml"
-    write_config_with_calendar(config_path, journal_path, sidecar_path)
+    write_config_with_calendar(config_path, sidecar_path)
     backend = FakeCalendarBackend()
     server = create_server(config_path, calendar_backend=backend)
 
@@ -404,7 +287,7 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
             "notes": None,
             "location": None,
             "timezone": "Asia/Shanghai",
-            "provenance_ids": [],
+            "source_refs": [],
             "idempotency_key": "calendar:create:demo",
         },
     )
@@ -421,7 +304,7 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
             "notes": None,
             "location": None,
             "timezone": "Asia/Shanghai",
-            "provenance_ids": [],
+            "source_refs": [],
             "confirmed_by_user": False,
             "idempotency_key": "calendar:update:demo",
         },
@@ -448,7 +331,7 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
             "notes": None,
             "location": None,
             "timezone": "Asia/Shanghai",
-            "provenance_ids": [],
+            "source_refs": [],
             "confirmed_by_user": True,
             "idempotency_key": "activity:record:demo",
         },
@@ -469,11 +352,9 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
 
 
 def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path) -> None:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
     sidecar_path = tmp_path / "state" / "activity.sqlite3"
     config_path = tmp_path / "config.toml"
-    write_config_with_reminders(config_path, journal_path, sidecar_path)
+    write_config_with_reminders(config_path, sidecar_path)
     backend = FakeReminderBackend()
     server = create_server(config_path, reminder_backend=backend)
 
@@ -495,7 +376,7 @@ def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path
             "notes": None,
             "due_date": "2026-07-09",
             "priority": 5,
-            "provenance_ids": [],
+            "source_refs": [],
             "idempotency_key": "reminder:create:demo",
         },
     )

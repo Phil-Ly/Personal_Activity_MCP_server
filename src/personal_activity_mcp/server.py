@@ -13,14 +13,11 @@ from mcp.server.fastmcp import FastMCP
 from personal_activity_mcp.activity import ActivityRepository
 from personal_activity_mcp.calendar import CalendarRepository, MacOSCalendarBackend
 from personal_activity_mcp.config import ConfigError, load_config
-from personal_activity_mcp.journal import JournalRepository
 from personal_activity_mcp.prompts.activity import register_activity_prompts
 from personal_activity_mcp.reminders import MacOSReminderBackend, ReminderRepository
-from personal_activity_mcp.resources.journal import register_journal_resources
 from personal_activity_mcp.sidecar import SidecarRepository
 from personal_activity_mcp.tools.activity import register_activity_tools
 from personal_activity_mcp.tools.calendar import register_calendar_tools
-from personal_activity_mcp.tools.journal import register_journal_tools
 from personal_activity_mcp.tools.reminders import register_reminder_tools
 
 DEFAULT_CONFIG_PATH = Path("~/.config/personal-activity-mcp/config.toml").expanduser()
@@ -31,13 +28,10 @@ def create_server(
     calendar_backend: object | None = None,
     reminder_backend: object | None = None,
 ) -> FastMCP:
-    """Create a server whose filesystem scope is fixed by validated configuration."""
+    """Create a server whose external-data scope is fixed by validated configuration."""
     config = load_config(config_path)
-    repository = JournalRepository(config)
     sidecar = SidecarRepository(config.sidecar_path)
     sidecar.initialize()
-    for source in config.journal_sources:
-        sidecar.upsert_journal_source(source)
     for source in config.calendar_sources:
         sidecar.upsert_calendar_source(source)
     for source in config.reminder_sources:
@@ -60,16 +54,17 @@ def create_server(
 
     server = FastMCP(
         "Personal Activity MCP",
-        instructions="Read local personal activity evidence without interpreting it.",
+        instructions=(
+            "Access configured Calendar, Reminders, and Activity Log capabilities "
+            "without interpreting user intent."
+        ),
         log_level="WARNING",
     )
 
-    register_journal_tools(server, repository, sidecar)
     register_calendar_tools(server, calendar_repository)
     register_activity_tools(server, activity_repository)
     register_reminder_tools(server, reminder_repository)
     register_activity_prompts(server)
-    register_journal_resources(server, repository)
 
     return server
 

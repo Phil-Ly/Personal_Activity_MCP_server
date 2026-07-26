@@ -1,8 +1,9 @@
-from datetime import date
+import sqlite3
 from pathlib import Path
 
-from personal_activity_mcp.config import AppConfig, CalendarSource, JournalSource, ReminderSource
-from personal_activity_mcp.journal import JournalRepository
+import pytest
+
+from personal_activity_mcp.config import CalendarSource, ReminderSource
 from personal_activity_mcp.sidecar import SidecarRepository
 
 
@@ -13,60 +14,33 @@ def table_names(database_path: Path) -> set[str]:
     return {row["name"] for row in rows}
 
 
-def test_initialize_creates_required_tables(tmp_path: Path) -> None:
+def test_initialize_creates_only_current_required_tables(tmp_path: Path) -> None:
     database_path = tmp_path / "nested" / "personal_activity.sqlite3"
 
     repository = SidecarRepository(database_path)
     repository.initialize()
 
-    assert table_names(database_path) >= {
+    assert table_names(database_path) == {
         "source",
-        "journal_entry",
         "mcp_item",
         "idempotency_key",
-        "provenance_link",
+        "source_link",
         "operation_audit",
         "schema_version",
     }
 
 
-def test_upsert_journal_entry_stores_metadata_without_body(tmp_path: Path) -> None:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
-    entry_path = journal_path / "2026-07-03.md"
-    entry_path.write_text(
-        "---\ntitle: Sidecar note\n---\n\nSECRET BODY MUST NOT BE STORED",
-        encoding="utf-8",
-    )
-    source = JournalSource("daily", journal_path.resolve(), (".md", ".txt"))
-    journal_repository = JournalRepository(AppConfig((source,), tmp_path / "unused.sqlite3"))
-    entry = journal_repository.list_entries(
-        start_date=date(2026, 7, 3),
-        end_date=date(2026, 7, 3),
-    ).entries[0]
+def test_source_table_rejects_removed_local_file_source_type(tmp_path: Path) -> None:
     repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
     repository.initialize()
 
-    repository.upsert_journal_source(source)
-    repository.upsert_journal_entry(entry)
-
-    with repository.connect() as connection:
-        source_row = connection.execute("SELECT * FROM source").fetchone()
-        entry_row = connection.execute("SELECT * FROM journal_entry").fetchone()
-        columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(journal_entry)").fetchall()
-        }
-
-    assert source_row["id"] == "journal:daily"
-    assert source_row["source_uri"] == journal_path.resolve().as_uri()
-    assert entry_row["id"] == entry.evidence_id
-    assert entry_row["source_id"] == "journal:daily"
-    assert entry_row["entry_date"] == "2026-07-03"
-    assert entry_row["file_path"] == entry.path
-    assert entry_row["title"] == "Sidecar note"
-    assert entry_row["content_hash"] == entry.content_hash
-    assert "content" not in columns
-    assert "SECRET BODY MUST NOT BE STORED" not in " ".join(str(value) for value in entry_row)
+    with pytest.raises(sqlite3.IntegrityError), repository.connect() as connection:
+        connection.execute(
+            """
+                INSERT INTO source (id, source_type, source_name, source_uri, config_key)
+                VALUES ('local:daily', 'local_file', 'Daily', 'file:///tmp/daily', 'daily')
+                """
+        )
 
 
 def test_upsert_calendar_source_stores_allowlisted_calendar_metadata(
@@ -160,7 +134,7 @@ def test_idempotency_detects_new_deduplicated_and_conflict(
     assert conflict.result_item_id == "calendar:event-1"
 
 
-def test_records_provenance_and_operation_audit(tmp_path: Path) -> None:
+def test_records_opaque_source_reference_and_operation_audit(tmp_path: Path) -> None:
     repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
     repository.initialize()
     repository.upsert_mcp_item(
@@ -175,10 +149,9 @@ def test_records_provenance_and_operation_audit(tmp_path: Path) -> None:
         created_by_mcp=True,
     )
 
-    provenance_id = repository.record_provenance_link(
+    source_link_id = repository.record_source_link(
         target_item_id="calendar:event-1",
-        evidence_type="journal_entry",
-        evidence_id="journal:abc123",
+        source_ref="file:daily/2026-07-26.md",
         relation_type="created_from",
     )
     audit_id = repository.record_operation_audit(
@@ -191,14 +164,13 @@ def test_records_provenance_and_operation_audit(tmp_path: Path) -> None:
     )
 
     with repository.connect() as connection:
-        provenance = connection.execute("SELECT * FROM provenance_link").fetchone()
+        source_link = connection.execute("SELECT * FROM source_link").fetchone()
         audit = connection.execute("SELECT * FROM operation_audit").fetchone()
 
-    assert provenance["id"] == provenance_id
-    assert provenance["target_item_id"] == "calendar:event-1"
-    assert provenance["evidence_type"] == "journal_entry"
-    assert provenance["evidence_id"] == "journal:abc123"
-    assert provenance["relation_type"] == "created_from"
+    assert source_link["id"] == source_link_id
+    assert source_link["target_item_id"] == "calendar:event-1"
+    assert source_link["source_ref"] == "file:daily/2026-07-26.md"
+    assert source_link["relation_type"] == "created_from"
     assert audit["id"] == audit_id
     assert audit["operation"] == "calendar.create_event"
     assert audit["target_item_id"] == "calendar:event-1"

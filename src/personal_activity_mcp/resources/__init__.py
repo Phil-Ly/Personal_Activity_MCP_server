@@ -1,1 +1,0 @@
-"""MCP Resource registration modules."""

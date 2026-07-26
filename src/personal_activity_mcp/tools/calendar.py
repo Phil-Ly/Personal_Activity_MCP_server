@@ -49,7 +49,7 @@ def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> 
         notes: str | None,
         location: str | None,
         timezone: str,
-        provenance_ids: list[str],
+        source_refs: list[str],
         idempotency_key: str,
     ) -> CalendarCreateResult:
         return repository.create_event(
@@ -61,7 +61,7 @@ def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> 
             notes=notes,
             location=location,
             timezone=timezone,
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
             idempotency_key=idempotency_key,
         )
 
@@ -80,7 +80,7 @@ def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> 
         notes: str | None,
         location: str | None,
         timezone: str,
-        provenance_ids: list[str],
+        source_refs: list[str],
         confirmed_by_user: bool,
         idempotency_key: str,
     ) -> CalendarUpdateResult:
@@ -94,7 +94,7 @@ def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> 
             notes=notes,
             location=location,
             timezone=timezone,
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
             confirmed_by_user=confirmed_by_user,
             idempotency_key=idempotency_key,
         )

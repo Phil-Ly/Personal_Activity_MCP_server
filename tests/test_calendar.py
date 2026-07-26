@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from personal_activity_mcp.calendar import CalendarEventRecord, CalendarRepository
-from personal_activity_mcp.config import AppConfig, CalendarSource, JournalSource
+from personal_activity_mcp.config import AppConfig, CalendarSource
 from personal_activity_mcp.sidecar import SidecarRepository
 
 
@@ -134,10 +134,7 @@ class FakeCalendarBackend:
 
 
 def make_config(tmp_path: Path) -> AppConfig:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
     return AppConfig(
-        journal_sources=(JournalSource("daily", journal_path.resolve(), (".md",)),),
         sidecar_path=tmp_path / "sidecar.sqlite3",
         calendar_sources=(
             CalendarSource("Personal", "Personal", True),
@@ -193,7 +190,7 @@ def test_list_events_queries_only_allowed_calendars_without_notes_by_default(
     assert evidence.calendar_id == "Personal"
     assert evidence.status_semantics == "planned"
     assert evidence.created_by_mcp is False
-    assert evidence.provenance_ids == []
+    assert evidence.source_refs == []
     assert evidence.notes is None
     assert evidence.location is None
 
@@ -239,10 +236,9 @@ def test_list_events_uses_sidecar_semantics_for_mcp_created_events(
         status_semantics="planned",
         created_by_mcp=True,
     )
-    sidecar.record_provenance_link(
+    sidecar.record_source_link(
         target_item_id="calendar_event:stable-1",
-        evidence_type="journal_entry",
-        evidence_id="journal:entry-1",
+        source_ref="file:daily/2026-07-26.md",
         relation_type="created_from",
     )
     event = CalendarEventRecord(
@@ -264,7 +260,7 @@ def test_list_events_uses_sidecar_semantics_for_mcp_created_events(
     evidence = result.events[0]
     assert evidence.created_by_mcp is True
     assert evidence.status_semantics == "planned"
-    assert evidence.provenance_ids == ["journal:entry-1"]
+    assert evidence.source_refs == ["file:daily/2026-07-26.md"]
 
 
 def test_create_event_writes_calendar_once_and_records_sidecar_metadata(
@@ -286,7 +282,7 @@ def test_create_event_writes_calendar_once_and_records_sidecar_metadata(
         notes="Private event notes",
         location="Room 1",
         timezone="Asia/Shanghai",
-        provenance_ids=["journal:entry-1"],
+        source_refs=["file:daily/2026-07-26.md"],
         idempotency_key="calendar:create:demo",
     )
     repeated = repository.create_event(
@@ -298,7 +294,7 @@ def test_create_event_writes_calendar_once_and_records_sidecar_metadata(
         notes="Private event notes",
         location="Room 1",
         timezone="Asia/Shanghai",
-        provenance_ids=["journal:entry-1"],
+        source_refs=["file:daily/2026-07-26.md"],
         idempotency_key="calendar:create:demo",
     )
 
@@ -313,7 +309,7 @@ def test_create_event_writes_calendar_once_and_records_sidecar_metadata(
     with sidecar.connect() as connection:
         item = connection.execute("SELECT * FROM mcp_item").fetchone()
         idempotency = connection.execute("SELECT * FROM idempotency_key").fetchone()
-        provenance = connection.execute("SELECT * FROM provenance_link").fetchone()
+        source_link = connection.execute("SELECT * FROM source_link").fetchone()
         audit = connection.execute("SELECT * FROM operation_audit").fetchone()
     assert item["id"] == created.stable_id
     assert item["item_type"] == "calendar_event"
@@ -323,9 +319,8 @@ def test_create_event_writes_calendar_once_and_records_sidecar_metadata(
     assert "MCP demo" not in " ".join(str(value) for value in item)
     assert idempotency["key"] == "calendar:create:demo"
     assert idempotency["result_item_id"] == created.stable_id
-    assert provenance["target_item_id"] == created.stable_id
-    assert provenance["evidence_type"] == "journal_entry"
-    assert provenance["evidence_id"] == "journal:entry-1"
+    assert source_link["target_item_id"] == created.stable_id
+    assert source_link["source_ref"] == "file:daily/2026-07-26.md"
     assert audit["operation"] == "calendar.create_event"
     assert audit["target_item_id"] == created.stable_id
     assert audit["result_status"] == "succeeded"
@@ -344,7 +339,7 @@ def test_create_event_rejects_calendar_without_write_permission(tmp_path: Path) 
             notes=None,
             location=None,
             timezone="Asia/Shanghai",
-            provenance_ids=[],
+            source_refs=[],
             idempotency_key="calendar:create:demo",
         )
 
@@ -365,7 +360,7 @@ def test_create_event_rejects_naive_datetime_before_backend(tmp_path: Path) -> N
             notes=None,
             location=None,
             timezone="Asia/Shanghai",
-            provenance_ids=[],
+            source_refs=[],
             idempotency_key="calendar:create:naive",
         )
 
@@ -387,7 +382,7 @@ def test_create_event_rejects_idempotency_conflict(tmp_path: Path) -> None:
         notes=None,
         location=None,
         timezone="Asia/Shanghai",
-        provenance_ids=[],
+        source_refs=[],
         idempotency_key="calendar:create:demo",
     )
 
@@ -401,7 +396,7 @@ def test_create_event_rejects_idempotency_conflict(tmp_path: Path) -> None:
             notes=None,
             location=None,
             timezone="Asia/Shanghai",
-            provenance_ids=[],
+            source_refs=[],
             idempotency_key="calendar:create:demo",
         )
 
@@ -424,7 +419,7 @@ def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -
         notes="Updated notes",
         location="Room 2",
         timezone="Asia/Shanghai",
-        provenance_ids=["journal:entry-1"],
+        source_refs=["file:daily/2026-07-26.md"],
         confirmed_by_user=False,
         idempotency_key="calendar:update:demo",
     )
@@ -438,7 +433,7 @@ def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -
         notes="Updated notes",
         location="Room 2",
         timezone="Asia/Shanghai",
-        provenance_ids=["journal:entry-1"],
+        source_refs=["file:daily/2026-07-26.md"],
         confirmed_by_user=False,
         idempotency_key="calendar:update:demo",
     )
@@ -483,7 +478,7 @@ def test_update_event_rejects_naive_datetime_before_backend(tmp_path: Path) -> N
             notes=None,
             location=None,
             timezone="Asia/Shanghai",
-            provenance_ids=[],
+            source_refs=[],
             confirmed_by_user=False,
             idempotency_key="calendar:update:naive",
         )
@@ -518,7 +513,7 @@ def test_update_confirmed_action_requires_user_confirmation(tmp_path: Path) -> N
             notes=None,
             location=None,
             timezone="Asia/Shanghai",
-            provenance_ids=[],
+            source_refs=[],
             confirmed_by_user=False,
             idempotency_key="calendar:update:confirmed-action",
         )

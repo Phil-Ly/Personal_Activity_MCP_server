@@ -5,7 +5,7 @@ import pytest
 
 from personal_activity_mcp.activity import ActivityRepository
 from personal_activity_mcp.calendar import CalendarEnsureRecord, CalendarEventRecord
-from personal_activity_mcp.config import AppConfig, CalendarSource, JournalSource
+from personal_activity_mcp.config import AppConfig, CalendarSource
 from personal_activity_mcp.sidecar import SidecarRepository
 
 
@@ -76,10 +76,7 @@ class FakeActivityCalendarBackend:
 
 
 def make_config(tmp_path: Path) -> AppConfig:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
     return AppConfig(
-        journal_sources=(JournalSource("daily", journal_path.resolve(), (".md",)),),
         sidecar_path=tmp_path / "sidecar.sqlite3",
         calendar_sources=(
             CalendarSource("Personal Activity Log", "Personal Activity Log", True),
@@ -155,7 +152,7 @@ def test_record_completed_action_requires_confirmation(tmp_path: Path) -> None:
             notes=None,
             location=None,
             timezone="Asia/Shanghai",
-            provenance_ids=[],
+            source_refs=[],
             confirmed_by_user=False,
             idempotency_key="activity:record:demo",
         )
@@ -180,7 +177,7 @@ def test_record_completed_action_writes_action_record_once(tmp_path: Path) -> No
         notes="只保存必要元数据",
         location=None,
         timezone="Asia/Shanghai",
-        provenance_ids=["journal:entry-1"],
+        source_refs=["file:daily/2026-07-26.md"],
         confirmed_by_user=True,
         idempotency_key="activity:record:demo",
     )
@@ -195,7 +192,7 @@ def test_record_completed_action_writes_action_record_once(tmp_path: Path) -> No
         notes="只保存必要元数据",
         location=None,
         timezone="Asia/Shanghai",
-        provenance_ids=["journal:entry-1"],
+        source_refs=["file:daily/2026-07-26.md"],
         confirmed_by_user=True,
         idempotency_key="activity:record:demo",
     )
@@ -206,7 +203,7 @@ def test_record_completed_action_writes_action_record_once(tmp_path: Path) -> No
     assert created.created is True
     assert created.deduplicated is False
     assert created.status_semantics == "confirmed"
-    assert created.provenance_ids == ["journal:entry-1"]
+    assert created.source_refs == ["file:daily/2026-07-26.md"]
     assert repeated.created is False
     assert repeated.deduplicated is True
     assert repeated.action_record_id == created.action_record_id
@@ -218,7 +215,7 @@ def test_record_completed_action_writes_action_record_once(tmp_path: Path) -> No
         audit = connection.execute(
             "SELECT * FROM operation_audit WHERE operation = 'activity.record_completed_action'"
         ).fetchone()
-        provenance = connection.execute("SELECT * FROM provenance_link").fetchone()
+        source_link = connection.execute("SELECT * FROM source_link").fetchone()
     assert item["item_type"] == "action_record"
     assert item["external_id"] == "activity-event-1"
     assert item["external_calendar_or_list_id"] == "Personal Activity Log"
@@ -227,8 +224,9 @@ def test_record_completed_action_writes_action_record_once(tmp_path: Path) -> No
     assert "整理 MCP 项目边界" not in " ".join(str(value) for value in item)
     assert audit["target_item_id"] == created.action_record_id
     assert audit["confirmed_by_user"] == 1
-    assert provenance["target_item_id"] == created.action_record_id
-    assert provenance["relation_type"] == "created_from"
+    assert source_link["target_item_id"] == created.action_record_id
+    assert source_link["source_ref"] == "file:daily/2026-07-26.md"
+    assert source_link["relation_type"] == "created_from"
 
 
 def test_record_completed_action_uses_injected_clock(tmp_path: Path) -> None:
@@ -253,7 +251,7 @@ def test_record_completed_action_uses_injected_clock(tmp_path: Path) -> None:
         notes=None,
         location=None,
         timezone="UTC",
-        provenance_ids=[],
+        source_refs=[],
         confirmed_by_user=True,
         idempotency_key="activity:record:fixed-clock",
     )
@@ -287,7 +285,7 @@ def test_record_completed_action_rejects_naive_datetime_before_backend(
             notes=None,
             location=None,
             timezone="Asia/Shanghai",
-            provenance_ids=[],
+            source_refs=[],
             confirmed_by_user=True,
             idempotency_key="activity:record:naive",
         )
@@ -316,7 +314,7 @@ def test_record_completed_action_rejects_non_activity_log_calendar(tmp_path: Pat
             notes=None,
             location=None,
             timezone="Asia/Shanghai",
-            provenance_ids=[],
+            source_refs=[],
             confirmed_by_user=True,
             idempotency_key="activity:record:wrong-calendar",
         )

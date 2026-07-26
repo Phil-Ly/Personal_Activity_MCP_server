@@ -1,9 +1,10 @@
 # Copy this file outside the repository or to a local ignored path.
-# Every source grants read access only to the configured directory tree.
+# Calendar and Reminder sources grant access only to the configured allowlists.
+# Local activity files are read by the Agent and are not configured in this server.
 
 # Optional. The loader uses this same repository-external path when omitted.
-# The sidecar stores local metadata, idempotency records, provenance links,
-# and operation audit rows. It must not store journal bodies or LLM summaries.
+# The sidecar stores local metadata, idempotency records, source references,
+# and operation audit rows. It must not store source bodies or LLM summaries.
 sidecar_path = "~/Library/Application Support/personal-activity-mcp/personal_activity.sqlite3"
 default_timezone = "Asia/Shanghai"
 default_activity_log_calendar_id = "Personal Activity Log"
@@ -12,7 +13,6 @@ default_activity_log_calendar_id = "Personal Activity Log"
 # Sensitive logging is disabled by default. Keep all detail flags false unless
 # you deliberately want logs to include private source content.
 sensitive_logging_enabled = false
-log_journal_content = false
 log_calendar_notes = false
 log_reminder_notes = false
 log_llm_outputs = false
@@ -25,11 +25,6 @@ allow_bulk_operations = false
 allow_delete_operations = false
 require_confirmation_for_completed_actions = true
 require_confirmation_for_confirmed_action_updates = true
-
-[[journal_sources]]
-source_id = "daily"
-path = "/Users/your-name/Documents/Journal"
-extensions = [".md", ".txt"]
 
 [[calendar_sources]]
 # In the current macOS backend, calendar_id is the Calendar.app calendar name.

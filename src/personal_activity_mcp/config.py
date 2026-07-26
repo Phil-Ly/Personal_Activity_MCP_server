@@ -21,15 +21,6 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
-class JournalSource:
-    """A single explicitly authorized journal directory."""
-
-    source_id: str
-    path: Path
-    extensions: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class CalendarSource:
     """A single explicitly authorized Apple Calendar."""
 
@@ -52,7 +43,6 @@ class PrivacyConfig:
     """Privacy controls for logging and stored diagnostic data."""
 
     sensitive_logging_enabled: bool = False
-    log_journal_content: bool = False
     log_calendar_notes: bool = False
     log_reminder_notes: bool = False
     log_llm_outputs: bool = False
@@ -73,7 +63,6 @@ class SecurityPolicy:
 class AppConfig:
     """Validated application configuration."""
 
-    journal_sources: tuple[JournalSource, ...]
     sidecar_path: Path = DEFAULT_SIDECAR_PATH
     calendar_sources: tuple[CalendarSource, ...] = ()
     reminder_sources: tuple[ReminderSource, ...] = ()
@@ -94,21 +83,21 @@ def load_config(config_path: Path) -> AppConfig:
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
         raise ConfigError(f"Unable to load configuration: {error}") from error
 
-    raw_sources = raw.get("journal_sources")
-    if not isinstance(raw_sources, list) or not raw_sources:
-        raise ConfigError("At least one journal_sources entry is required")
-
-    sources: list[JournalSource] = []
-    seen_ids: set[str] = set()
-    for raw_source in raw_sources:
-        source = _parse_journal_source(raw_source)
-        if source.source_id in seen_ids:
-            raise ConfigError(f"Duplicate journal source_id: {source.source_id}")
-        seen_ids.add(source.source_id)
-        sources.append(source)
+    _reject_unknown_keys(
+        raw,
+        {
+            "sidecar_path",
+            "calendar_sources",
+            "reminder_sources",
+            "default_activity_log_calendar_id",
+            "default_timezone",
+            "privacy",
+            "security",
+        },
+        "configuration",
+    )
 
     return AppConfig(
-        journal_sources=tuple(sources),
         sidecar_path=_parse_sidecar_path(raw.get("sidecar_path")),
         calendar_sources=_parse_calendar_sources(raw.get("calendar_sources")),
         reminder_sources=_parse_reminder_sources(raw.get("reminder_sources")),
@@ -155,15 +144,21 @@ def _parse_privacy_config(raw_privacy: object) -> PrivacyConfig:
         return PrivacyConfig()
     if not isinstance(raw_privacy, dict):
         raise ConfigError("privacy must be a TOML table")
+    _reject_unknown_keys(
+        raw_privacy,
+        {
+            "sensitive_logging_enabled",
+            "log_calendar_notes",
+            "log_reminder_notes",
+            "log_llm_outputs",
+        },
+        "privacy",
+    )
 
     config = PrivacyConfig(
         sensitive_logging_enabled=_parse_bool(
             raw_privacy.get("sensitive_logging_enabled", False),
             "privacy.sensitive_logging_enabled",
-        ),
-        log_journal_content=_parse_bool(
-            raw_privacy.get("log_journal_content", False),
-            "privacy.log_journal_content",
         ),
         log_calendar_notes=_parse_bool(
             raw_privacy.get("log_calendar_notes", False),
@@ -179,10 +174,7 @@ def _parse_privacy_config(raw_privacy: object) -> PrivacyConfig:
         ),
     )
     if not config.sensitive_logging_enabled and (
-        config.log_journal_content
-        or config.log_calendar_notes
-        or config.log_reminder_notes
-        or config.log_llm_outputs
+        config.log_calendar_notes or config.log_reminder_notes or config.log_llm_outputs
     ):
         raise ConfigError("Sensitive logging detail flags require sensitive_logging_enabled = true")
     return config
@@ -233,6 +225,16 @@ def _parse_bool(raw_value: object, field_name: str) -> bool:
     if not isinstance(raw_value, bool):
         raise ConfigError(f"{field_name} must be a boolean")
     return raw_value
+
+
+def _reject_unknown_keys(
+    values: dict[str, object],
+    allowed_keys: set[str],
+    section_name: str,
+) -> None:
+    unknown_keys = sorted(set(values) - allowed_keys)
+    if unknown_keys:
+        raise ConfigError(f"Unknown {section_name} keys: {', '.join(unknown_keys)}")
 
 
 def _parse_calendar_sources(raw_sources: object) -> tuple[CalendarSource, ...]:
@@ -312,34 +314,4 @@ def _parse_reminder_source(raw_source: object) -> ReminderSource:
         list_id=list_id.strip(),
         title=title.strip(),
         allow_write=allow_write,
-    )
-
-
-def _parse_journal_source(raw_source: object) -> JournalSource:
-    if not isinstance(raw_source, dict):
-        raise ConfigError("Each journal_sources entry must be a TOML table")
-
-    source_id = raw_source.get("source_id")
-    if not isinstance(source_id, str) or not source_id.strip():
-        raise ConfigError("Journal source_id must be a non-empty string")
-
-    raw_path = raw_source.get("path")
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        raise ConfigError(f"Journal path is required for source: {source_id}")
-    journal_path = Path(raw_path).expanduser().resolve()
-    if not journal_path.exists():
-        raise ConfigError(f"Journal directory does not exist: {journal_path}")
-    if not journal_path.is_dir():
-        raise ConfigError(f"Journal path is not a directory: {journal_path}")
-
-    raw_extensions = raw_source.get("extensions", [".md", ".txt"])
-    if not isinstance(raw_extensions, list) or not raw_extensions:
-        raise ConfigError(f"Journal extensions must be a non-empty list: {source_id}")
-    if not all(isinstance(value, str) and value.startswith(".") for value in raw_extensions):
-        raise ConfigError(f"Journal extensions must start with '.': {source_id}")
-
-    return JournalSource(
-        source_id=source_id.strip(),
-        path=journal_path,
-        extensions=tuple(extension.lower() for extension in raw_extensions),
     )

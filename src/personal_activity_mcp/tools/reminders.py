@@ -46,7 +46,7 @@ def register_reminder_tools(server: FastMCP, repository: ReminderRepository) -> 
         notes: str | None,
         due_date: date | None,
         priority: int | None,
-        provenance_ids: list[str],
+        source_refs: list[str],
         idempotency_key: str,
     ) -> ReminderCreateResult:
         return repository.create_reminder(
@@ -55,7 +55,7 @@ def register_reminder_tools(server: FastMCP, repository: ReminderRepository) -> 
             notes=notes,
             due_date=due_date,
             priority=priority,
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
             idempotency_key=idempotency_key,
         )
 

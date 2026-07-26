@@ -54,7 +54,7 @@ class CalendarEventEvidence(BaseModel):
     notes: str | None
     created_by_mcp: bool
     status_semantics: Literal["planned", "probable", "confirmed"]
-    provenance_ids: list[str]
+    source_refs: list[str]
 
 
 class CalendarListResult(BaseModel):
@@ -73,7 +73,7 @@ class CalendarCreateResult(BaseModel):
     created: bool
     deduplicated: bool
     status_semantics: Literal["planned"]
-    provenance_ids: list[str]
+    source_refs: list[str]
 
 
 class CalendarUpdateResult(BaseModel):
@@ -87,5 +87,5 @@ class CalendarUpdateResult(BaseModel):
     updated_fields: list[str]
     requires_user_confirmation: bool
     status_semantics: Literal["planned", "probable", "confirmed"]
-    provenance_ids: list[str]
+    source_refs: list[str]
     audit_id: str | None

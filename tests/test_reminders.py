@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from personal_activity_mcp.config import AppConfig, JournalSource, ReminderSource
+from personal_activity_mcp.config import AppConfig, ReminderSource
 from personal_activity_mcp.reminders import ReminderRecord, ReminderRepository
 from personal_activity_mcp.sidecar import SidecarRepository
 
@@ -92,10 +92,7 @@ class FakeReminderBackend:
 
 
 def make_config(tmp_path: Path) -> AppConfig:
-    journal_path = tmp_path / "journal"
-    journal_path.mkdir()
     return AppConfig(
-        journal_sources=(JournalSource("daily", journal_path.resolve(), (".md",)),),
         sidecar_path=tmp_path / "sidecar.sqlite3",
         reminder_sources=(
             ReminderSource("Personal", "Personal", True),
@@ -145,7 +142,7 @@ def test_list_reminders_queries_only_allowed_lists_without_notes_by_default(
     assert evidence.list_id == "Personal"
     assert evidence.status_semantics == "planned"
     assert evidence.created_by_mcp is False
-    assert evidence.provenance_ids == []
+    assert evidence.source_refs == []
     assert evidence.notes is None
 
 
@@ -199,7 +196,7 @@ def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path
         notes="Private reminder notes",
         due_date=date(2026, 7, 9),
         priority=5,
-        provenance_ids=["journal:entry-1"],
+        source_refs=["file:daily/2026-07-26.md"],
         idempotency_key="reminder:create:demo",
     )
     repeated = repository.create_reminder(
@@ -208,7 +205,7 @@ def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path
         notes="Private reminder notes",
         due_date=date(2026, 7, 9),
         priority=5,
-        provenance_ids=["journal:entry-1"],
+        source_refs=["file:daily/2026-07-26.md"],
         idempotency_key="reminder:create:demo",
     )
 
@@ -223,7 +220,7 @@ def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path
     with sidecar.connect() as connection:
         item = connection.execute("SELECT * FROM mcp_item").fetchone()
         idempotency = connection.execute("SELECT * FROM idempotency_key").fetchone()
-        provenance = connection.execute("SELECT * FROM provenance_link").fetchone()
+        source_link = connection.execute("SELECT * FROM source_link").fetchone()
         audit = connection.execute("SELECT * FROM operation_audit").fetchone()
     assert item["id"] == created.stable_id
     assert item["item_type"] == "reminder"
@@ -232,8 +229,8 @@ def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path
     assert "MCP todo" not in " ".join(str(value) for value in item)
     assert idempotency["key"] == "reminder:create:demo"
     assert idempotency["result_item_id"] == created.stable_id
-    assert provenance["target_item_id"] == created.stable_id
-    assert provenance["evidence_id"] == "journal:entry-1"
+    assert source_link["target_item_id"] == created.stable_id
+    assert source_link["source_ref"] == "file:daily/2026-07-26.md"
     assert audit["operation"] == "reminders.create_reminder"
     assert audit["target_item_id"] == created.stable_id
     assert audit["result_status"] == "succeeded"
@@ -249,7 +246,7 @@ def test_create_reminder_rejects_list_without_write_permission(tmp_path: Path) -
             notes=None,
             due_date=None,
             priority=None,
-            provenance_ids=[],
+            source_refs=[],
             idempotency_key="reminder:create:demo",
         )
 
@@ -264,7 +261,7 @@ def test_create_reminder_rejects_idempotency_conflict(tmp_path: Path) -> None:
         notes=None,
         due_date=None,
         priority=None,
-        provenance_ids=[],
+        source_refs=[],
         idempotency_key="reminder:create:demo",
     )
 
@@ -275,7 +272,7 @@ def test_create_reminder_rejects_idempotency_conflict(tmp_path: Path) -> None:
             notes=None,
             due_date=None,
             priority=None,
-            provenance_ids=[],
+            source_refs=[],
             idempotency_key="reminder:create:demo",
         )
 

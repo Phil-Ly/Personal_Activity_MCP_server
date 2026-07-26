@@ -46,7 +46,7 @@ class ReminderEvidence(BaseModel):
     completion_date: datetime | None
     created_by_mcp: bool
     status_semantics: Literal["planned", "confirmed"]
-    provenance_ids: list[str]
+    source_refs: list[str]
 
 
 class ReminderListResult(BaseModel):
@@ -65,7 +65,7 @@ class ReminderCreateResult(BaseModel):
     created: bool
     deduplicated: bool
     status_semantics: Literal["planned"]
-    provenance_ids: list[str]
+    source_refs: list[str]
 
 
 class ReminderCompleteResult(BaseModel):

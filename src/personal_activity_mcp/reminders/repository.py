@@ -111,7 +111,7 @@ class ReminderRepository:
         notes: str | None,
         due_date: date | None,
         priority: int | None,
-        provenance_ids: list[str],
+        source_refs: list[str],
         idempotency_key: str,
     ) -> ReminderCreateResult:
         """Create a Reminder with allowlist, idempotency, and audit controls."""
@@ -134,7 +134,7 @@ class ReminderRepository:
                 "notes": notes,
                 "due_date": due_date.isoformat() if due_date else None,
                 "priority": priority,
-                "provenance_ids": provenance_ids,
+                "source_refs": source_refs,
             }
         )
         decision = self._sidecar.check_idempotency_key(
@@ -155,7 +155,7 @@ class ReminderRepository:
                 created=False,
                 deduplicated=True,
                 status_semantics="planned",
-                provenance_ids=provenance_ids,
+                source_refs=source_refs,
             )
 
         record = self._backend.create_reminder(
@@ -177,11 +177,10 @@ class ReminderRepository:
             status_semantics="planned",
             created_by_mcp=True,
         )
-        for provenance_id in provenance_ids:
-            self._sidecar.record_provenance_link(
+        for source_ref in source_refs:
+            self._sidecar.record_source_link(
                 target_item_id=stable_id,
-                evidence_type=_evidence_type_from_id(provenance_id),
-                evidence_id=provenance_id,
+                source_ref=source_ref,
                 relation_type="created_from",
             )
         self._sidecar.record_idempotency_success(
@@ -205,7 +204,7 @@ class ReminderRepository:
             created=True,
             deduplicated=False,
             status_semantics="planned",
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
         )
 
     def complete_reminder(
@@ -329,7 +328,7 @@ class ReminderRepository:
 
     def _to_evidence(self, record: ReminderRecord, *, include_notes: bool) -> ReminderEvidence:
         sidecar_item = None
-        provenance_ids: list[str] = []
+        source_refs: list[str] = []
         if self._sidecar is not None:
             sidecar_item = self._sidecar.find_mcp_item_by_external(
                 item_type="reminder",
@@ -337,7 +336,7 @@ class ReminderRepository:
                 external_calendar_or_list_id=record.list_id,
             )
             if sidecar_item is not None:
-                provenance_ids = self._sidecar.list_provenance_ids(str(sidecar_item["id"]))
+                source_refs = self._sidecar.list_source_refs(str(sidecar_item["id"]))
         return ReminderEvidence(
             evidence_id=_reminder_evidence_id(record.list_id, record.reminder_id),
             source_id=record.list_id,
@@ -352,7 +351,7 @@ class ReminderRepository:
             completion_date=record.completion_date,
             created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
             status_semantics="confirmed" if record.is_completed else "planned",
-            provenance_ids=provenance_ids,
+            source_refs=source_refs,
         )
 
 
@@ -374,13 +373,3 @@ def _stable_completed_reminder_item_id(list_id: str, reminder_id: str) -> str:
 def _request_hash(payload: dict[str, object]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-def _evidence_type_from_id(evidence_id: str):
-    if evidence_id.startswith("journal:"):
-        return "journal_entry"
-    if evidence_id.startswith("calendar:") or evidence_id.startswith("calendar_event:"):
-        return "calendar_event"
-    if evidence_id.startswith("reminder:"):
-        return "reminder"
-    raise ValueError(f"Unsupported provenance id: {evidence_id}")
