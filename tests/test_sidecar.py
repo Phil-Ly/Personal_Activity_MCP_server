@@ -21,6 +21,8 @@ def test_initialize_creates_only_current_required_tables(tmp_path: Path) -> None
     repository.initialize()
 
     assert table_names(database_path) == {
+        "action_candidate",
+        "calendar_event_state",
         "source",
         "mcp_item",
         "idempotency_key",
@@ -96,7 +98,7 @@ def test_idempotency_detects_new_deduplicated_and_conflict(
         item_id="calendar:event-1",
         item_type="calendar_event",
         external_id="event-1",
-        external_calendar_or_list_id="calendar-1",
+        external_container_id="calendar-1",
         title_hash="title-hash",
         time_start="2026-07-08T10:00:00+08:00",
         time_end="2026-07-08T11:00:00+08:00",
@@ -125,6 +127,17 @@ def test_idempotency_detects_new_deduplicated_and_conflict(
         operation="calendar.create_event",
         request_hash="request-hash-2",
     )
+    other_operation = repository.check_idempotency_key(
+        key="calendar:create:demo",
+        operation="calendar.update_event",
+        request_hash="request-hash-3",
+    )
+    repository.record_idempotency_success(
+        key="calendar:create:demo",
+        operation="calendar.update_event",
+        request_hash="request-hash-3",
+        result_item_id="calendar:event-1",
+    )
 
     assert initial.decision == "new"
     assert initial.result_item_id is None
@@ -132,6 +145,13 @@ def test_idempotency_detects_new_deduplicated_and_conflict(
     assert repeated.result_item_id == "calendar:event-1"
     assert conflict.decision == "conflict"
     assert conflict.result_item_id == "calendar:event-1"
+    assert other_operation.decision == "new"
+    with repository.connect() as connection:
+        row_count = connection.execute(
+            "SELECT COUNT(*) FROM idempotency_key WHERE key = ?",
+            ("calendar:create:demo",),
+        ).fetchone()[0]
+    assert row_count == 2
 
 
 def test_records_opaque_source_reference_and_operation_audit(tmp_path: Path) -> None:
@@ -141,7 +161,7 @@ def test_records_opaque_source_reference_and_operation_audit(tmp_path: Path) -> 
         item_id="calendar:event-1",
         item_type="calendar_event",
         external_id="event-1",
-        external_calendar_or_list_id="calendar-1",
+        external_container_id="calendar-1",
         title_hash="title-hash",
         time_start="2026-07-08T10:00:00+08:00",
         time_end="2026-07-08T11:00:00+08:00",
@@ -186,7 +206,7 @@ def test_lists_external_item_contexts_in_one_batch(tmp_path: Path) -> None:
         item_id="calendar:event-1",
         item_type="calendar_event",
         external_id="event-1",
-        external_calendar_or_list_id="Personal",
+        external_container_id="Personal",
         title_hash="calendar-title",
         time_start="2026-07-08T10:00:00+08:00",
         time_end="2026-07-08T11:00:00+08:00",
@@ -197,7 +217,7 @@ def test_lists_external_item_contexts_in_one_batch(tmp_path: Path) -> None:
         item_id="reminder:reminder-1",
         item_type="reminder",
         external_id="reminder-1",
-        external_calendar_or_list_id="Personal",
+        external_container_id="Personal",
         title_hash="reminder-title",
         time_start=None,
         time_end=None,
@@ -208,6 +228,10 @@ def test_lists_external_item_contexts_in_one_batch(tmp_path: Path) -> None:
         target_item_id="calendar:event-1",
         source_ref="file:daily/2026-07-26.md",
         relation_type="created_from",
+    )
+    repository.set_calendar_completion_status(
+        item_id="calendar:event-1",
+        completion_status="completed",
     )
 
     contexts = repository.list_external_item_contexts(
@@ -223,6 +247,8 @@ def test_lists_external_item_contexts_in_one_batch(tmp_path: Path) -> None:
     reminder = contexts[("reminder", "reminder-1", "Personal")]
     assert calendar.item["id"] == "calendar:event-1"
     assert calendar.source_refs == ("file:daily/2026-07-26.md",)
+    assert calendar.completion_status == "completed"
     assert reminder.item["id"] == "reminder:reminder-1"
     assert reminder.source_refs == ()
+    assert reminder.completion_status == "unknown"
     assert len(contexts) == 2

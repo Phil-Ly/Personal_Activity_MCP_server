@@ -19,13 +19,22 @@ from personal_activity_mcp.calendar.models import (
 )
 from personal_activity_mcp.common import (
     TargetRef,
+    ToolContractError,
     ToolWarning,
     decode_cursor,
+    normalize_source_refs,
     paginate,
     validate_limit,
 )
 from personal_activity_mcp.config import AppConfig
-from personal_activity_mcp.sidecar import ExternalItemContext, SidecarRepository
+from personal_activity_mcp.sidecar import (
+    AuditWrite,
+    ExternalItemContext,
+    McpItemWrite,
+    ReservationDecision,
+    SidecarRepository,
+    WriteControl,
+)
 from personal_activity_mcp.time_policy import Clock, SystemClock, require_aware_datetime
 
 
@@ -84,6 +93,7 @@ class CalendarRepository:
         self._calendar_sources = {source.calendar_id: source for source in config.calendar_sources}
         self._backend = backend
         self._sidecar = sidecar
+        self._write_control = WriteControl(sidecar) if sidecar is not None else None
         self._clock = clock or SystemClock()
 
     def list_events(
@@ -174,6 +184,7 @@ class CalendarRepository:
         if start >= end:
             raise ValueError("start must be before end")
 
+        normalized_source_refs = normalize_source_refs(source_refs)
         request_hash = _request_hash(
             {
                 "calendar_id": calendar_id,
@@ -184,72 +195,78 @@ class CalendarRepository:
                 "notes": notes,
                 "location": location,
                 "timezone": timezone,
-                "source_refs": source_refs,
+                "source_refs": normalized_source_refs,
             }
         )
-        decision = self._sidecar.check_idempotency_key(
-            key=idempotency_key,
+        write_control = self._require_write_control()
+        decision = write_control.reserve_operation(
+            idempotency_key=idempotency_key,
             operation="calendar.create_event",
             request_hash=request_hash,
         )
-        if decision.decision == "conflict":
-            raise ValueError("idempotency_key conflicts with different request")
-        if decision.decision == "deduplicated":
+        _raise_for_non_executable_reservation(decision)
+        if decision.status == "deduplicated":
             item = self._sidecar.get_mcp_item(decision.result_item_id or "")
             if item is None:
                 raise ValueError("idempotency result item is missing")
             return CalendarCreateResult(
                 event_id=str(item["external_id"]),
-                calendar_id=str(item["external_calendar_or_list_id"]),
+                calendar_id=str(item["external_container_id"]),
                 stable_id=str(item["id"]),
                 created=False,
                 deduplicated=True,
                 status_semantics="planned",
-                source_refs=source_refs,
+                source_refs=normalized_source_refs,
             )
 
-        record = self._backend.create_event(
-            calendar_id=calendar_id,
-            title=title,
-            start=start,
-            end=end,
-            is_all_day=is_all_day,
-            notes=notes,
-            location=location,
-            timezone=timezone,
-        )
-        stable_id = _stable_calendar_item_id(idempotency_key)
-        self._sidecar.upsert_mcp_item(
-            item_id=stable_id,
-            item_type="calendar_event",
-            external_id=record.event_id,
-            external_calendar_or_list_id=calendar_id,
-            title_hash=_request_hash({"title": title}),
-            time_start=start.isoformat(),
-            time_end=end.isoformat(),
-            status_semantics="planned",
-            created_by_mcp=True,
-        )
-        for source_ref in source_refs:
-            self._sidecar.record_source_link(
-                target_item_id=stable_id,
-                source_ref=source_ref,
-                relation_type="created_from",
+        try:
+            record = self._backend.create_event(
+                calendar_id=calendar_id,
+                title=title,
+                start=start,
+                end=end,
+                is_all_day=is_all_day,
+                notes=notes,
+                location=location,
+                timezone=timezone,
             )
-        self._sidecar.record_idempotency_success(
-            key=idempotency_key,
-            operation="calendar.create_event",
-            request_hash=request_hash,
-            result_item_id=stable_id,
-        )
-        self._sidecar.record_operation_audit(
-            operation="calendar.create_event",
-            target_item_id=stable_id,
-            request_hash=request_hash,
-            result_status="succeeded",
-            error_code=None,
-            confirmed_by_user=True,
-        )
+        except Exception as error:
+            _finalize_backend_failure(
+                write_control,
+                idempotency_key=idempotency_key,
+                operation="calendar.create_event",
+                request_hash=request_hash,
+                confirmed_by_user=True,
+                error=error,
+            )
+        stable_id = _stable_calendar_item_id(idempotency_key)
+        try:
+            write_control.finalize_success(
+                idempotency_key=idempotency_key,
+                operation="calendar.create_event",
+                item=McpItemWrite(
+                    item_id=stable_id,
+                    item_type="calendar_event",
+                    external_id=record.event_id,
+                    external_container_id=calendar_id,
+                    title_hash=_request_hash({"title": title}),
+                    time_start=start.isoformat(),
+                    time_end=end.isoformat(),
+                    status_semantics="planned",
+                    state_token=_calendar_state_token(record),
+                    created_by_mcp=True,
+                    source_relation_type="created_from",
+                ),
+                source_refs=normalized_source_refs,
+                audit=AuditWrite(
+                    request_hash=request_hash,
+                    result_status="succeeded",
+                    error_code=None,
+                    confirmed_by_user=True,
+                ),
+            )
+        except Exception as error:
+            raise _external_state_unknown_error() from error
         return CalendarCreateResult(
             event_id=record.event_id,
             calendar_id=calendar_id,
@@ -257,8 +274,13 @@ class CalendarRepository:
             created=True,
             deduplicated=False,
             status_semantics="planned",
-            source_refs=source_refs,
+            source_refs=normalized_source_refs,
         )
+
+    def _require_write_control(self) -> WriteControl:
+        if self._write_control is None:
+            raise ValueError("sidecar is required for Calendar writes")
+        return self._write_control
 
     def update_event(
         self,
@@ -300,7 +322,7 @@ class CalendarRepository:
 
         sidecar_item = self._sidecar_item_for_calendar_event(
             external_id=event_id,
-            external_calendar_or_list_id=calendar_id,
+            external_container_id=calendar_id,
         )
         if _is_confirmed_action_record(sidecar_item) and not confirmed_by_user:
             request_hash = _request_hash(
@@ -331,6 +353,7 @@ class CalendarRepository:
         if not updated_fields:
             raise ValueError("At least one update field is required")
 
+        normalized_source_refs = normalize_source_refs(source_refs)
         request_hash = _request_hash(
             {
                 "calendar_id": calendar_id,
@@ -342,45 +365,55 @@ class CalendarRepository:
                 "notes": notes,
                 "location": location,
                 "timezone": timezone,
-                "source_refs": source_refs,
+                "source_refs": normalized_source_refs,
                 "confirmed_by_user": confirmed_by_user,
             }
         )
-        decision = self._sidecar.check_idempotency_key(
-            key=idempotency_key,
+        write_control = self._require_write_control()
+        decision = write_control.reserve_operation(
+            idempotency_key=idempotency_key,
             operation="calendar.update_event",
             request_hash=request_hash,
         )
-        if decision.decision == "conflict":
-            raise ValueError("idempotency_key conflicts with different request")
-        if decision.decision == "deduplicated":
+        _raise_for_non_executable_reservation(decision)
+        if decision.status == "deduplicated":
             item = self._sidecar.get_mcp_item(decision.result_item_id or "")
             if item is None:
                 raise ValueError("idempotency result item is missing")
             return CalendarUpdateResult(
                 event_id=str(item["external_id"]),
-                calendar_id=str(item["external_calendar_or_list_id"]),
+                calendar_id=str(item["external_container_id"]),
                 stable_id=str(item["id"]),
                 updated=False,
                 deduplicated=True,
                 updated_fields=updated_fields,
                 requires_user_confirmation=False,
                 status_semantics=_sidecar_status_semantics(item),
-                source_refs=source_refs,
+                source_refs=normalized_source_refs,
                 audit_id=None,
             )
 
-        record = self._backend.update_event(
-            event_id=event_id,
-            calendar_id=calendar_id,
-            title=title,
-            start=start,
-            end=end,
-            is_all_day=is_all_day,
-            notes=notes,
-            location=location,
-            timezone=timezone,
-        )
+        try:
+            record = self._backend.update_event(
+                event_id=event_id,
+                calendar_id=calendar_id,
+                title=title,
+                start=start,
+                end=end,
+                is_all_day=is_all_day,
+                notes=notes,
+                location=location,
+                timezone=timezone,
+            )
+        except Exception as error:
+            _finalize_backend_failure(
+                write_control,
+                idempotency_key=idempotency_key,
+                operation="calendar.update_event",
+                request_hash=request_hash,
+                confirmed_by_user=confirmed_by_user,
+                error=error,
+            )
         stable_id = (
             str(sidecar_item["id"])
             if sidecar_item is not None
@@ -389,39 +422,36 @@ class CalendarRepository:
         status_semantics = (
             _sidecar_status_semantics(sidecar_item) if sidecar_item is not None else "planned"
         )
-        self._sidecar.upsert_mcp_item(
-            item_id=stable_id,
-            item_type=str(sidecar_item["item_type"])
-            if sidecar_item is not None
-            else "calendar_event",
-            external_id=record.event_id,
-            external_calendar_or_list_id=calendar_id,
-            title_hash=_request_hash({"title": record.title}),
-            time_start=record.start.isoformat(),
-            time_end=record.end.isoformat(),
-            status_semantics=status_semantics,
-            created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
-        )
-        for source_ref in source_refs:
-            self._sidecar.record_source_link(
-                target_item_id=stable_id,
-                source_ref=source_ref,
-                relation_type="updated_from",
-            )
-        self._sidecar.record_idempotency_success(
-            key=idempotency_key,
-            operation="calendar.update_event",
-            request_hash=request_hash,
-            result_item_id=stable_id,
-        )
-        audit_id = self._sidecar.record_operation_audit(
-            operation="calendar.update_event",
-            target_item_id=stable_id,
+        audit = AuditWrite(
             request_hash=request_hash,
             result_status="succeeded",
             error_code=None,
             confirmed_by_user=confirmed_by_user,
         )
+        try:
+            write_control.finalize_success(
+                idempotency_key=idempotency_key,
+                operation="calendar.update_event",
+                item=McpItemWrite(
+                    item_id=stable_id,
+                    item_type=str(sidecar_item["item_type"])
+                    if sidecar_item is not None
+                    else "calendar_event",
+                    external_id=record.event_id,
+                    external_container_id=calendar_id,
+                    title_hash=_request_hash({"title": record.title}),
+                    time_start=record.start.isoformat(),
+                    time_end=record.end.isoformat(),
+                    status_semantics=status_semantics,
+                    state_token=_calendar_state_token(record),
+                    created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
+                    source_relation_type="updated_from",
+                ),
+                source_refs=normalized_source_refs,
+                audit=audit,
+            )
+        except Exception as error:
+            raise _external_state_unknown_error() from error
         return CalendarUpdateResult(
             event_id=record.event_id,
             calendar_id=calendar_id,
@@ -431,8 +461,8 @@ class CalendarRepository:
             updated_fields=updated_fields,
             requires_user_confirmation=False,
             status_semantics=status_semantics,
-            source_refs=source_refs,
-            audit_id=audit_id,
+            source_refs=normalized_source_refs,
+            audit_id=audit.audit_id,
         )
 
     def _select_calendar_ids(self, calendar_ids: list[str] | None) -> list[str]:
@@ -485,7 +515,7 @@ class CalendarRepository:
             notes=record.notes if include_notes else None,
             created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
             status_semantics=status_semantics,
-            completion_status="unknown",
+            completion_status=context.completion_status if context is not None else "unknown",
             source_refs=source_refs,
         )
 
@@ -504,21 +534,21 @@ class CalendarRepository:
         self,
         *,
         external_id: str,
-        external_calendar_or_list_id: str,
+        external_container_id: str,
     ) -> dict[str, object] | None:
         if self._sidecar is None:
             return None
         calendar_item = self._sidecar.find_mcp_item_by_external(
             item_type="calendar_event",
             external_id=external_id,
-            external_calendar_or_list_id=external_calendar_or_list_id,
+            external_container_id=external_container_id,
         )
         if calendar_item is not None:
             return calendar_item
         return self._sidecar.find_mcp_item_by_external(
             item_type="action_record",
             external_id=external_id,
-            external_calendar_or_list_id=external_calendar_or_list_id,
+            external_container_id=external_container_id,
         )
 
 
@@ -643,3 +673,64 @@ def _validate_timezone(timezone: str) -> None:
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError as error:
         raise ValueError(f"Unknown timezone: {timezone}") from error
+
+
+def _raise_for_non_executable_reservation(decision: ReservationDecision) -> None:
+    if decision.status == "conflict":
+        raise ValueError("idempotency_key conflicts with different request")
+    if decision.status == "in_progress":
+        raise ToolContractError(
+            code="OPERATION_IN_PROGRESS",
+            message="The same write operation is already in progress",
+            retryable=True,
+            public_message="The same write operation is already in progress",
+        )
+    if decision.status == "external_state_unknown":
+        raise _external_state_unknown_error()
+
+
+def _finalize_backend_failure(
+    write_control: WriteControl,
+    *,
+    idempotency_key: str,
+    operation: str,
+    request_hash: str,
+    confirmed_by_user: bool,
+    error: Exception,
+) -> None:
+    if getattr(error, "external_state_changed", None) is False:
+        write_control.finalize_failure(
+            idempotency_key=idempotency_key,
+            operation=operation,
+            status="failed",
+            error_code="BACKEND_FAILURE",
+            audit=AuditWrite(
+                request_hash=request_hash,
+                result_status="failed",
+                error_code="BACKEND_FAILURE",
+                confirmed_by_user=confirmed_by_user,
+            ),
+        )
+        raise error
+    write_control.finalize_failure(
+        idempotency_key=idempotency_key,
+        operation=operation,
+        status="external_state_unknown",
+        error_code="EXTERNAL_STATE_UNKNOWN",
+        audit=AuditWrite(
+            request_hash=request_hash,
+            result_status="external_state_unknown",
+            error_code="EXTERNAL_STATE_UNKNOWN",
+            confirmed_by_user=confirmed_by_user,
+        ),
+    )
+    raise _external_state_unknown_error() from error
+
+
+def _external_state_unknown_error() -> ToolContractError:
+    return ToolContractError(
+        code="EXTERNAL_STATE_UNKNOWN",
+        message="The external write result could not be verified",
+        retryable=False,
+        public_message="The external write result is unknown and will not be retried automatically",
+    )

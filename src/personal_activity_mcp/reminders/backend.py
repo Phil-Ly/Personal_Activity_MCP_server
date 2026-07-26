@@ -14,6 +14,15 @@ from personal_activity_mcp.reminders.models import ReminderRecord
 class ReminderBackendError(RuntimeError):
     """Raised when Reminders.app automation fails."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        external_state_changed: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.external_state_changed = external_state_changed
+
 
 class MacOSReminderBackend:
     """Read and write Reminders.app through the local osascript bridge."""
@@ -103,7 +112,10 @@ class MacOSReminderBackend:
                 timeout=30,
             )
         except (OSError, subprocess.SubprocessError) as error:
-            raise ReminderBackendError(f"Unable to run osascript: {error}") from error
+            raise ReminderBackendError(
+                f"Unable to run osascript: {error}",
+                external_state_changed=False,
+            ) from error
         if result.returncode != 0:
             message = result.stderr.strip() or result.stdout.strip() or "unknown Reminders error"
             raise ReminderBackendError(f"Reminders automation failed: {message}")

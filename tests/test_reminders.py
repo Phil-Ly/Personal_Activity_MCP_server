@@ -406,7 +406,7 @@ def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path
         notes="Private reminder notes",
         due_date=date(2026, 7, 9),
         priority=5,
-        source_refs=["file:daily/2026-07-26.md"],
+        source_refs=[" file:b ", "file:a", "file:b", ""],
         idempotency_key="reminder:create:demo",
     )
     repeated = repository.create_reminder(
@@ -415,7 +415,7 @@ def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path
         notes="Private reminder notes",
         due_date=date(2026, 7, 9),
         priority=5,
-        source_refs=["file:daily/2026-07-26.md"],
+        source_refs=["file:a", "file:b"],
         idempotency_key="reminder:create:demo",
     )
 
@@ -427,20 +427,27 @@ def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path
     assert repeated.deduplicated is True
     assert repeated.reminder_id == "created-reminder-1"
     assert repeated.stable_id == created.stable_id
+    assert created.source_refs == ["file:a", "file:b"]
+    assert repeated.source_refs == ["file:a", "file:b"]
     with sidecar.connect() as connection:
         item = connection.execute("SELECT * FROM mcp_item").fetchone()
         idempotency = connection.execute("SELECT * FROM idempotency_key").fetchone()
-        source_link = connection.execute("SELECT * FROM source_link").fetchone()
+        source_links = connection.execute(
+            "SELECT * FROM source_link ORDER BY source_ref"
+        ).fetchall()
         audit = connection.execute("SELECT * FROM operation_audit").fetchone()
     assert item["id"] == created.stable_id
     assert item["item_type"] == "reminder"
     assert item["external_id"] == "created-reminder-1"
-    assert item["external_calendar_or_list_id"] == "Personal"
+    assert item["external_container_id"] == "Personal"
     assert "MCP todo" not in " ".join(str(value) for value in item)
     assert idempotency["key"] == "reminder:create:demo"
     assert idempotency["result_item_id"] == created.stable_id
-    assert source_link["target_item_id"] == created.stable_id
-    assert source_link["source_ref"] == "file:daily/2026-07-26.md"
+    assert [row["target_item_id"] for row in source_links] == [
+        created.stable_id,
+        created.stable_id,
+    ]
+    assert [row["source_ref"] for row in source_links] == ["file:a", "file:b"]
     assert audit["operation"] == "reminders.create_reminder"
     assert audit["target_item_id"] == created.stable_id
     assert audit["result_status"] == "succeeded"
@@ -512,6 +519,12 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
         confirmed_by_user=True,
         idempotency_key="reminder:complete:demo",
     )
+    repeated = repository.complete_reminder(
+        reminder_id="reminder-1",
+        completion_date=completion_date,
+        confirmed_by_user=True,
+        idempotency_key="reminder:complete:demo",
+    )
 
     assert backend.complete_calls == [
         {
@@ -522,6 +535,7 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
     ]
     assert result.reminder_id == "reminder-1"
     assert result.is_completed is True
+    assert repeated.is_completed is True
     assert result.completion_date == completion_date
     assert result.status_semantics == "confirmed"
     with sidecar.connect() as connection:

@@ -14,6 +14,15 @@ from personal_activity_mcp.calendar.models import CalendarEventRecord
 class CalendarBackendError(RuntimeError):
     """Raised when Calendar.app automation fails."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        external_state_changed: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.external_state_changed = external_state_changed
+
 
 class MacOSCalendarBackend:
     """Read and write Calendar.app through the local osascript bridge."""
@@ -117,7 +126,10 @@ class MacOSCalendarBackend:
                 timeout=30,
             )
         except (OSError, subprocess.SubprocessError) as error:
-            raise CalendarBackendError(f"Unable to run osascript: {error}") from error
+            raise CalendarBackendError(
+                f"Unable to run osascript: {error}",
+                external_state_changed=False,
+            ) from error
         if result.returncode != 0:
             message = result.stderr.strip() or result.stdout.strip() or "unknown Calendar error"
             raise CalendarBackendError(f"Calendar automation failed: {message}")

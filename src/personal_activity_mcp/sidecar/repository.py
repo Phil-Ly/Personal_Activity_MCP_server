@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import uuid
 from collections.abc import Iterator
@@ -11,6 +12,10 @@ from pathlib import Path
 from typing import Literal
 
 from personal_activity_mcp.config import CalendarSource, ReminderSource
+from personal_activity_mcp.sidecar.migrations import (
+    current_schema_version,
+    initialize_schema,
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,7 @@ class ExternalItemContext:
 
     item: dict[str, object]
     source_refs: tuple[str, ...]
+    completion_status: Literal["unknown", "incomplete", "completed"] = "unknown"
 
 
 class SidecarRepository:
@@ -34,6 +40,12 @@ class SidecarRepository:
 
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path.expanduser().resolve()
+        self._last_migration_backup_path: Path | None = None
+
+    @property
+    def last_migration_backup_path(self) -> Path | None:
+        """Return the backup created by this repository instance, if any."""
+        return self._last_migration_backup_path
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -51,10 +63,61 @@ class SidecarRepository:
             connection.close()
 
     def initialize(self) -> None:
-        """Create the sidecar database schema if it does not already exist."""
-        self._database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as connection:
-            connection.executescript(_SCHEMA_SQL)
+        """Create or transactionally migrate the private sidecar database."""
+        self._secure_database_path()
+        connection = sqlite3.connect(self._database_path, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            if current_schema_version(connection) == 1:
+                self._last_migration_backup_path = self._create_pre_v2_backup(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            initialize_schema(connection)
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError("Sidecar migration produced foreign key violations")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.close()
+
+    def _secure_database_path(self) -> None:
+        self._database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        parent_mode = self._database_path.parent.stat().st_mode & 0o777
+        if parent_mode & 0o077:
+            raise PermissionError(
+                "Sidecar parent directory must not be accessible by group or other users"
+            )
+        descriptor = os.open(self._database_path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.close(descriptor)
+        os.chmod(self._database_path, 0o600)
+
+    def _create_pre_v2_backup(self, connection: sqlite3.Connection) -> Path:
+        backup_path = self._database_path.with_name(
+            f"{self._database_path.stem}.pre-v2-{uuid.uuid4().hex}.sqlite3"
+        )
+        descriptor = os.open(
+            backup_path,
+            os.O_CREAT | os.O_EXCL | os.O_RDWR,
+            0o600,
+        )
+        os.close(descriptor)
+        backup_connection: sqlite3.Connection | None = None
+        try:
+            backup_connection = sqlite3.connect(backup_path)
+            connection.backup(backup_connection)
+            backup_connection.close()
+            backup_connection = None
+            os.chmod(backup_path, 0o600)
+        except Exception:
+            if backup_connection is not None:
+                backup_connection.close()
+            backup_path.unlink(missing_ok=True)
+            raise
+        return backup_path
 
     def upsert_calendar_source(self, source: CalendarSource) -> str:
         """Store metadata for one configured Calendar source."""
@@ -112,12 +175,13 @@ class SidecarRepository:
         item_id: str,
         item_type: Literal["calendar_event", "reminder", "action_record"],
         external_id: str | None,
-        external_calendar_or_list_id: str | None,
+        external_container_id: str | None,
         title_hash: str | None,
         time_start: str | None,
         time_end: str | None,
         status_semantics: str | None,
         created_by_mcp: bool,
+        state_token: str | None = None,
     ) -> str:
         """Store an MCP-managed external item mapping."""
         with self.connect() as connection:
@@ -127,22 +191,24 @@ class SidecarRepository:
                     id,
                     item_type,
                     external_id,
-                    external_calendar_or_list_id,
+                    external_container_id,
                     title_hash,
                     time_start,
                     time_end,
                     status_semantics,
+                    state_token,
                     created_by_mcp
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     item_type = excluded.item_type,
                     external_id = excluded.external_id,
-                    external_calendar_or_list_id = excluded.external_calendar_or_list_id,
+                    external_container_id = excluded.external_container_id,
                     title_hash = excluded.title_hash,
                     time_start = excluded.time_start,
                     time_end = excluded.time_end,
                     status_semantics = excluded.status_semantics,
+                    state_token = excluded.state_token,
                     created_by_mcp = excluded.created_by_mcp,
                     updated_at = CURRENT_TIMESTAMP
                 """,
@@ -150,11 +216,12 @@ class SidecarRepository:
                     item_id,
                     item_type,
                     external_id,
-                    external_calendar_or_list_id,
+                    external_container_id,
                     title_hash,
                     time_start,
                     time_end,
                     status_semantics,
+                    state_token,
                     1 if created_by_mcp else 0,
                 ),
             )
@@ -176,7 +243,7 @@ class SidecarRepository:
         *,
         item_type: str,
         external_id: str,
-        external_calendar_or_list_id: str,
+        external_container_id: str,
     ) -> dict[str, object] | None:
         """Return one MCP item row by external system identifiers."""
         with self.connect() as connection:
@@ -186,10 +253,10 @@ class SidecarRepository:
                 FROM mcp_item
                 WHERE item_type = ?
                   AND external_id = ?
-                  AND external_calendar_or_list_id = ?
+                  AND external_container_id = ?
                   AND deleted_at IS NULL
                 """,
-                (item_type, external_id, external_calendar_or_list_id),
+                (item_type, external_id, external_container_id),
             ).fetchone()
         if row is None:
             return None
@@ -209,6 +276,37 @@ class SidecarRepository:
             ).fetchall()
         return [str(row["source_ref"]) for row in rows]
 
+    def set_calendar_completion_status(
+        self,
+        *,
+        item_id: str,
+        completion_status: Literal["unknown", "incomplete", "completed"],
+    ) -> None:
+        """Store completion independently from Calendar time semantics."""
+        if completion_status not in {"unknown", "incomplete", "completed"}:
+            raise ValueError("completion_status is invalid")
+        with self.connect() as connection:
+            item = connection.execute(
+                """
+                SELECT item_type
+                FROM mcp_item
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (item_id,),
+            ).fetchone()
+            if item is None or item["item_type"] != "calendar_event":
+                raise ValueError("Calendar event mapping is missing")
+            connection.execute(
+                """
+                INSERT INTO calendar_event_state (item_id, completion_status)
+                VALUES (?, ?)
+                ON CONFLICT(item_id) DO UPDATE SET
+                    completion_status = excluded.completion_status,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (item_id, completion_status),
+            )
+
     def list_external_item_contexts(
         self,
         *,
@@ -223,7 +321,7 @@ class SidecarRepository:
 
         item_type_placeholders = ", ".join("?" for _ in unique_item_types)
         target_predicates = " OR ".join(
-            "(external_id = ? AND external_calendar_or_list_id = ?)" for _ in unique_targets
+            "(external_id = ? AND external_container_id = ?)" for _ in unique_targets
         )
         parameters: list[str] = list(unique_item_types)
         for external_id, container_id in unique_targets:
@@ -240,7 +338,7 @@ class SidecarRepository:
                 ORDER BY
                     item_type,
                     external_id,
-                    external_calendar_or_list_id,
+                    external_container_id,
                     updated_at DESC,
                     id
                 """,
@@ -251,12 +349,13 @@ class SidecarRepository:
                 key = (
                     str(row["item_type"]),
                     str(row["external_id"]),
-                    str(row["external_calendar_or_list_id"]),
+                    str(row["external_container_id"]),
                 )
                 items.setdefault(key, dict(row))
 
             item_ids = [str(item["id"]) for item in items.values()]
             refs_by_item: dict[str, list[str]] = {item_id: [] for item_id in item_ids}
+            completion_by_item: dict[str, str] = {}
             if item_ids:
                 item_id_placeholders = ", ".join("?" for _ in item_ids)
                 source_rows = connection.execute(
@@ -272,11 +371,23 @@ class SidecarRepository:
                     refs_by_item[str(source_row["target_item_id"])].append(
                         str(source_row["source_ref"])
                     )
+                completion_rows = connection.execute(
+                    f"""
+                    SELECT item_id, completion_status
+                    FROM calendar_event_state
+                    WHERE item_id IN ({item_id_placeholders})
+                    """,
+                    item_ids,
+                ).fetchall()
+                completion_by_item = {
+                    str(row["item_id"]): str(row["completion_status"]) for row in completion_rows
+                }
 
         return {
             key: ExternalItemContext(
                 item=item,
                 source_refs=tuple(refs_by_item[str(item["id"])]),
+                completion_status=completion_by_item.get(str(item["id"]), "unknown"),
             )
             for key, item in items.items()
         }
@@ -294,13 +405,13 @@ class SidecarRepository:
                 """
                 SELECT operation, request_hash, result_item_id
                 FROM idempotency_key
-                WHERE key = ?
+                WHERE key = ? AND operation = ?
                 """,
-                (key,),
+                (key, operation),
             ).fetchone()
         if row is None:
             return IdempotencyDecision("new", None)
-        if row["operation"] == operation and row["request_hash"] == request_hash:
+        if row["request_hash"] == request_hash:
             return IdempotencyDecision("deduplicated", row["result_item_id"])
         return IdempotencyDecision("conflict", row["result_item_id"])
 
@@ -313,29 +424,30 @@ class SidecarRepository:
         result_item_id: str,
     ) -> str:
         """Persist a successful idempotent write result."""
-        row_id = f"idempotency:{key}"
+        row_identity = operation + "\0" + key
+        row_id = f"idempotency:{uuid.uuid5(uuid.NAMESPACE_URL, row_identity).hex}"
         with self.connect() as connection:
             existing = connection.execute(
                 """
-                SELECT operation, request_hash
+                SELECT request_hash
                 FROM idempotency_key
-                WHERE key = ?
+                WHERE key = ? AND operation = ?
                 """,
-                (key,),
+                (key, operation),
             ).fetchone()
-            if existing is not None and (
-                existing["operation"] != operation or existing["request_hash"] != request_hash
-            ):
+            if existing is not None and existing["request_hash"] != request_hash:
                 raise ValueError("idempotency key conflicts with an existing request")
             connection.execute(
                 """
                 INSERT INTO idempotency_key (
-                    id, key, operation, request_hash, result_item_id, status
+                    id, key, operation, request_hash, hash_version,
+                    result_item_id, status
                 )
-                VALUES (?, ?, ?, ?, ?, 'succeeded')
-                ON CONFLICT(key) DO UPDATE SET
+                VALUES (?, ?, ?, ?, 2, ?, 'succeeded')
+                ON CONFLICT(key, operation) DO UPDATE SET
                     result_item_id = excluded.result_item_id,
                     status = 'succeeded',
+                    error_code = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (row_id, key, operation, request_hash, result_item_id),
@@ -408,75 +520,3 @@ class SidecarRepository:
                 ),
             )
         return row_id
-
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-INSERT OR IGNORE INTO schema_version (version) VALUES (1);
-
-CREATE TABLE IF NOT EXISTS source (
-    id TEXT PRIMARY KEY,
-    source_type TEXT NOT NULL CHECK (source_type IN ('calendar', 'reminder')),
-    source_name TEXT NOT NULL,
-    source_uri TEXT NOT NULL,
-    config_key TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS mcp_item (
-    id TEXT PRIMARY KEY,
-    item_type TEXT NOT NULL CHECK (
-        item_type IN ('calendar_event', 'reminder', 'action_record')
-    ),
-    external_id TEXT,
-    external_calendar_or_list_id TEXT,
-    title_hash TEXT,
-    time_start TEXT,
-    time_end TEXT,
-    status_semantics TEXT,
-    created_by_mcp INTEGER NOT NULL CHECK (created_by_mcp IN (0, 1)),
-    deleted_at TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS idempotency_key (
-    id TEXT PRIMARY KEY,
-    key TEXT NOT NULL UNIQUE,
-    operation TEXT NOT NULL,
-    request_hash TEXT NOT NULL,
-    result_item_id TEXT,
-    status TEXT NOT NULL CHECK (status IN ('succeeded', 'failed', 'conflict')),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (result_item_id) REFERENCES mcp_item(id)
-);
-
-CREATE TABLE IF NOT EXISTS source_link (
-    id TEXT PRIMARY KEY,
-    target_item_id TEXT NOT NULL,
-    source_ref TEXT NOT NULL,
-    relation_type TEXT NOT NULL CHECK (
-        relation_type IN ('created_from', 'supported_by', 'updated_from')
-    ),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (target_item_id) REFERENCES mcp_item(id)
-);
-
-CREATE TABLE IF NOT EXISTS operation_audit (
-    id TEXT PRIMARY KEY,
-    operation TEXT NOT NULL,
-    target_item_id TEXT,
-    request_hash TEXT NOT NULL,
-    result_status TEXT NOT NULL,
-    error_code TEXT,
-    confirmed_by_user INTEGER NOT NULL CHECK (confirmed_by_user IN (0, 1)),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (target_item_id) REFERENCES mcp_item(id)
-);
-"""
