@@ -10,6 +10,7 @@ from personal_activity_mcp.calendar import (
     CalendarRepository,
     CalendarUpdateResult,
 )
+from personal_activity_mcp.common import ToolOutcome, call_safely
 
 
 def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> None:
@@ -26,13 +27,19 @@ def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> 
         calendar_ids: list[str] | None = None,
         include_notes: bool = False,
         include_location: bool = False,
-    ) -> CalendarListResult:
-        return repository.list_events(
-            calendar_ids=calendar_ids,
-            start=start,
-            end=end,
-            include_notes=include_notes,
-            include_location=include_location,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> ToolOutcome[CalendarListResult]:
+        return call_safely(
+            lambda: repository.list_events(
+                calendar_ids=calendar_ids,
+                start=start,
+                end=end,
+                include_notes=include_notes,
+                include_location=include_location,
+                limit=limit,
+                cursor=cursor,
+            )
         )
 
     @server.tool(
@@ -51,18 +58,20 @@ def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> 
         timezone: str,
         source_refs: list[str],
         idempotency_key: str,
-    ) -> CalendarCreateResult:
-        return repository.create_event(
-            calendar_id=calendar_id,
-            title=title,
-            start=start,
-            end=end,
-            is_all_day=is_all_day,
-            notes=notes,
-            location=location,
-            timezone=timezone,
-            source_refs=source_refs,
-            idempotency_key=idempotency_key,
+    ) -> ToolOutcome[CalendarCreateResult]:
+        return call_safely(
+            lambda: repository.create_event(
+                calendar_id=calendar_id,
+                title=title,
+                start=start,
+                end=end,
+                is_all_day=is_all_day,
+                notes=notes,
+                location=location,
+                timezone=timezone,
+                source_refs=source_refs,
+                idempotency_key=idempotency_key,
+            )
         )
 
     @server.tool(
@@ -83,18 +92,20 @@ def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> 
         source_refs: list[str],
         confirmed_by_user: bool,
         idempotency_key: str,
-    ) -> CalendarUpdateResult:
-        return repository.update_event(
-            calendar_id=calendar_id,
-            event_id=event_id,
-            title=title,
-            start=start,
-            end=end,
-            is_all_day=is_all_day,
-            notes=notes,
-            location=location,
-            timezone=timezone,
-            source_refs=source_refs,
-            confirmed_by_user=confirmed_by_user,
-            idempotency_key=idempotency_key,
+    ) -> ToolOutcome[CalendarUpdateResult]:
+        return call_safely(
+            lambda: repository.update_event(
+                calendar_id=calendar_id,
+                event_id=event_id,
+                title=title,
+                start=start,
+                end=end,
+                is_all_day=is_all_day,
+                notes=notes,
+                location=location,
+                timezone=timezone,
+                source_refs=source_refs,
+                confirmed_by_user=confirmed_by_user,
+                idempotency_key=idempotency_key,
+            )
         )

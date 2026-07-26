@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -188,11 +188,208 @@ def test_list_events_queries_only_allowed_calendars_without_notes_by_default(
     assert evidence.source_id == "Personal"
     assert evidence.event_id == "event-1"
     assert evidence.calendar_id == "Personal"
+    assert evidence.target_ref.model_dump() == {
+        "resource_type": "calendar_event",
+        "item_id": "event-1",
+        "container_id": "Personal",
+    }
+    assert evidence.state_token
+    assert evidence.completion_status == "unknown"
     assert evidence.status_semantics == "planned"
     assert evidence.created_by_mcp is False
     assert evidence.source_refs == []
     assert evidence.notes is None
     assert evidence.location is None
+
+
+def test_list_events_excludes_backend_records_outside_selected_calendars(
+    tmp_path: Path,
+) -> None:
+    backend = FakeCalendarBackend(
+        [
+            CalendarEventRecord(
+                event_id="work-event",
+                calendar_id="Work",
+                title="Work event",
+                start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+                end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+                is_all_day=False,
+            )
+        ]
+    )
+    repository = CalendarRepository(make_config(tmp_path), backend)
+
+    result = repository.list_events(
+        calendar_ids=["Personal"],
+        start=datetime(2026, 7, 8, 9, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 18, tzinfo=UTC),
+    )
+
+    assert result.events == []
+
+
+def test_list_events_deduplicates_identical_records_and_warns_on_conflicts(
+    tmp_path: Path,
+) -> None:
+    identical = CalendarEventRecord(
+        event_id="event-1",
+        calendar_id="Personal",
+        title="Same event",
+        start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+        is_all_day=False,
+    )
+    conflict_a = CalendarEventRecord(
+        event_id="event-2",
+        calendar_id="Personal",
+        title="First title",
+        start=datetime(2026, 7, 8, 12, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 13, tzinfo=UTC),
+        is_all_day=False,
+    )
+    conflict_b = conflict_a.model_copy(update={"title": "Conflicting title"})
+    repository = CalendarRepository(
+        make_config(tmp_path),
+        FakeCalendarBackend([identical, identical.model_copy(), conflict_a, conflict_b]),
+    )
+
+    result = repository.list_events(
+        calendar_ids=["Personal"],
+        start=datetime(2026, 7, 8, 9, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 18, tzinfo=UTC),
+    )
+
+    assert [event.event_id for event in result.events] == ["event-1"]
+    assert [warning.model_dump() for warning in result.warnings] == [
+        {
+            "code": "DUPLICATE_SOURCE_ITEM",
+            "message": "Conflicting Calendar records share the same source identity",
+            "related_item_ids": ["Personal:event-2"],
+        }
+    ]
+
+
+def test_list_events_uses_stable_bounded_cursor_pagination(tmp_path: Path) -> None:
+    events = [
+        CalendarEventRecord(
+            event_id=f"event-{index}",
+            calendar_id="Personal",
+            title=f"Event {index}",
+            start=datetime(2026, 7, 8, 9 + index, tzinfo=UTC),
+            end=datetime(2026, 7, 8, 10 + index, tzinfo=UTC),
+            is_all_day=False,
+        )
+        for index in range(3)
+    ]
+    repository = CalendarRepository(make_config(tmp_path), FakeCalendarBackend(events))
+    query = {
+        "calendar_ids": ["Personal"],
+        "start": datetime(2026, 7, 8, 8, tzinfo=UTC),
+        "end": datetime(2026, 7, 8, 18, tzinfo=UTC),
+        "limit": 2,
+    }
+
+    first = repository.list_events(**query)
+    second = repository.list_events(**query, cursor=first.next_cursor)
+
+    assert [event.event_id for event in first.events] == ["event-0", "event-1"]
+    assert first.next_cursor is not None
+    assert [event.event_id for event in second.events] == ["event-2"]
+    assert second.next_cursor is None
+
+
+@pytest.mark.parametrize(
+    ("limit", "cursor", "message"),
+    [
+        (0, None, "limit must be between 1 and 200"),
+        (100, "invalid-cursor", "cursor is invalid"),
+    ],
+)
+def test_list_events_rejects_invalid_pagination_before_backend(
+    tmp_path: Path,
+    limit: int,
+    cursor: str | None,
+    message: str,
+) -> None:
+    backend = FakeCalendarBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend)
+
+    with pytest.raises(ValueError, match=message):
+        repository.list_events(
+            calendar_ids=["Personal"],
+            start=datetime(2026, 7, 8, 9, tzinfo=UTC),
+            end=datetime(2026, 7, 8, 18, tzinfo=UTC),
+            limit=limit,
+            cursor=cursor,
+        )
+
+    assert backend.list_calls == []
+
+
+def test_list_events_preserves_backend_local_dates_for_all_day_events(
+    tmp_path: Path,
+) -> None:
+    event = CalendarEventRecord(
+        event_id="all-day-1",
+        calendar_id="Personal",
+        title="All day event",
+        start=datetime(2026, 7, 7, 16, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 16, tzinfo=UTC),
+        is_all_day=True,
+        start_date=date(2026, 7, 8),
+        end_date=date(2026, 7, 9),
+    )
+    repository = CalendarRepository(
+        make_config(tmp_path),
+        FakeCalendarBackend([event]),
+    )
+
+    result = repository.list_events(
+        calendar_ids=["Personal"],
+        start=datetime(2026, 7, 7, 0, tzinfo=UTC),
+        end=datetime(2026, 7, 10, 0, tzinfo=UTC),
+    )
+
+    assert result.events[0].time_range.model_dump() == {
+        "kind": "all_day",
+        "start_date": date(2026, 7, 8),
+        "end_date": date(2026, 7, 9),
+    }
+
+
+def test_state_token_is_stable_when_sensitive_fields_are_hidden(
+    tmp_path: Path,
+) -> None:
+    event = CalendarEventRecord(
+        event_id="event-1",
+        calendar_id="Personal",
+        title="MCP demo",
+        start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+        is_all_day=False,
+        location="Room 1",
+        notes="Private notes",
+    )
+    repository = CalendarRepository(
+        make_config(tmp_path),
+        FakeCalendarBackend([event]),
+    )
+    query = {
+        "calendar_ids": ["Personal"],
+        "start": datetime(2026, 7, 8, 9, tzinfo=UTC),
+        "end": datetime(2026, 7, 8, 18, tzinfo=UTC),
+    }
+
+    hidden = repository.list_events(**query)
+    visible = repository.list_events(
+        **query,
+        include_notes=True,
+        include_location=True,
+    )
+
+    assert hidden.events[0].state_token == visible.events[0].state_token
+    assert hidden.events[0].notes is None
+    assert visible.events[0].notes == "Private notes"
 
 
 def test_list_events_rejects_unconfigured_calendar(tmp_path: Path) -> None:
@@ -220,7 +417,7 @@ def test_list_events_rejects_naive_datetime_before_backend(tmp_path: Path) -> No
     assert backend.list_calls == []
 
 
-def test_list_events_uses_sidecar_semantics_for_mcp_created_events(
+def test_list_events_uses_current_time_semantics_for_mcp_created_events(
     tmp_path: Path,
 ) -> None:
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
@@ -249,7 +446,12 @@ def test_list_events_uses_sidecar_semantics_for_mcp_created_events(
         end=datetime(2026, 7, 8, 11, tzinfo=UTC),
         is_all_day=False,
     )
-    repository = CalendarRepository(make_config(tmp_path), FakeCalendarBackend([event]), sidecar)
+    repository = CalendarRepository(
+        make_config(tmp_path),
+        FakeCalendarBackend([event]),
+        sidecar,
+        clock=FixedClock(datetime(2026, 7, 8, 12, tzinfo=UTC)),
+    )
 
     result = repository.list_events(
         calendar_ids=["Personal"],
@@ -259,7 +461,7 @@ def test_list_events_uses_sidecar_semantics_for_mcp_created_events(
 
     evidence = result.events[0]
     assert evidence.created_by_mcp is True
-    assert evidence.status_semantics == "planned"
+    assert evidence.status_semantics == "probable"
     assert evidence.source_refs == ["file:daily/2026-07-26.md"]
 
 

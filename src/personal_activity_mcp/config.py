@@ -45,7 +45,8 @@ class PrivacyConfig:
     sensitive_logging_enabled: bool = False
     log_calendar_notes: bool = False
     log_reminder_notes: bool = False
-    log_llm_outputs: bool = False
+    log_candidate_data: bool = False
+    log_source_refs: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,8 +56,8 @@ class SecurityPolicy:
     allow_remote_transport: bool = False
     allow_bulk_operations: bool = False
     allow_delete_operations: bool = False
-    require_confirmation_for_completed_actions: bool = True
-    require_confirmation_for_confirmed_action_updates: bool = True
+    require_confirmation_for_event_completion_updates: bool = True
+    require_confirmation_for_reminder_completion: bool = True
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,6 @@ class AppConfig:
     sidecar_path: Path = DEFAULT_SIDECAR_PATH
     calendar_sources: tuple[CalendarSource, ...] = ()
     reminder_sources: tuple[ReminderSource, ...] = ()
-    default_activity_log_calendar_id: str = "Personal Activity Log"
     default_timezone: str = "UTC"
     privacy: PrivacyConfig = PrivacyConfig()
     security: SecurityPolicy = SecurityPolicy()
@@ -89,7 +89,6 @@ def load_config(config_path: Path) -> AppConfig:
             "sidecar_path",
             "calendar_sources",
             "reminder_sources",
-            "default_activity_log_calendar_id",
             "default_timezone",
             "privacy",
             "security",
@@ -101,9 +100,6 @@ def load_config(config_path: Path) -> AppConfig:
         sidecar_path=_parse_sidecar_path(raw.get("sidecar_path")),
         calendar_sources=_parse_calendar_sources(raw.get("calendar_sources")),
         reminder_sources=_parse_reminder_sources(raw.get("reminder_sources")),
-        default_activity_log_calendar_id=_parse_default_activity_log_calendar_id(
-            raw.get("default_activity_log_calendar_id")
-        ),
         default_timezone=_parse_default_timezone(raw.get("default_timezone")),
         privacy=_parse_privacy_config(raw.get("privacy")),
         security=_parse_security_policy(raw.get("security")),
@@ -131,14 +127,6 @@ def _parse_default_timezone(raw_timezone: object) -> str:
     return timezone
 
 
-def _parse_default_activity_log_calendar_id(raw_calendar_id: object) -> str:
-    if raw_calendar_id is None:
-        return "Personal Activity Log"
-    if not isinstance(raw_calendar_id, str) or not raw_calendar_id.strip():
-        raise ConfigError("default_activity_log_calendar_id must be a non-empty string")
-    return raw_calendar_id.strip()
-
-
 def _parse_privacy_config(raw_privacy: object) -> PrivacyConfig:
     if raw_privacy is None:
         return PrivacyConfig()
@@ -150,7 +138,8 @@ def _parse_privacy_config(raw_privacy: object) -> PrivacyConfig:
             "sensitive_logging_enabled",
             "log_calendar_notes",
             "log_reminder_notes",
-            "log_llm_outputs",
+            "log_candidate_data",
+            "log_source_refs",
         },
         "privacy",
     )
@@ -168,13 +157,20 @@ def _parse_privacy_config(raw_privacy: object) -> PrivacyConfig:
             raw_privacy.get("log_reminder_notes", False),
             "privacy.log_reminder_notes",
         ),
-        log_llm_outputs=_parse_bool(
-            raw_privacy.get("log_llm_outputs", False),
-            "privacy.log_llm_outputs",
+        log_candidate_data=_parse_bool(
+            raw_privacy.get("log_candidate_data", False),
+            "privacy.log_candidate_data",
+        ),
+        log_source_refs=_parse_bool(
+            raw_privacy.get("log_source_refs", False),
+            "privacy.log_source_refs",
         ),
     )
     if not config.sensitive_logging_enabled and (
-        config.log_calendar_notes or config.log_reminder_notes or config.log_llm_outputs
+        config.log_calendar_notes
+        or config.log_reminder_notes
+        or config.log_candidate_data
+        or config.log_source_refs
     ):
         raise ConfigError("Sensitive logging detail flags require sensitive_logging_enabled = true")
     return config
@@ -185,6 +181,17 @@ def _parse_security_policy(raw_security: object) -> SecurityPolicy:
         return SecurityPolicy()
     if not isinstance(raw_security, dict):
         raise ConfigError("security must be a TOML table")
+    _reject_unknown_keys(
+        raw_security,
+        {
+            "allow_remote_transport",
+            "allow_bulk_operations",
+            "allow_delete_operations",
+            "require_confirmation_for_event_completion_updates",
+            "require_confirmation_for_reminder_completion",
+        },
+        "security",
+    )
 
     policy = SecurityPolicy(
         allow_remote_transport=_parse_bool(
@@ -199,13 +206,13 @@ def _parse_security_policy(raw_security: object) -> SecurityPolicy:
             raw_security.get("allow_delete_operations", False),
             "security.allow_delete_operations",
         ),
-        require_confirmation_for_completed_actions=_parse_bool(
-            raw_security.get("require_confirmation_for_completed_actions", True),
-            "security.require_confirmation_for_completed_actions",
+        require_confirmation_for_event_completion_updates=_parse_bool(
+            raw_security.get("require_confirmation_for_event_completion_updates", True),
+            "security.require_confirmation_for_event_completion_updates",
         ),
-        require_confirmation_for_confirmed_action_updates=_parse_bool(
-            raw_security.get("require_confirmation_for_confirmed_action_updates", True),
-            "security.require_confirmation_for_confirmed_action_updates",
+        require_confirmation_for_reminder_completion=_parse_bool(
+            raw_security.get("require_confirmation_for_reminder_completion", True),
+            "security.require_confirmation_for_reminder_completion",
         ),
     )
     if policy.allow_remote_transport:
@@ -214,10 +221,10 @@ def _parse_security_policy(raw_security: object) -> SecurityPolicy:
         raise ConfigError("Bulk operations are not supported in v1.0")
     if policy.allow_delete_operations:
         raise ConfigError("Delete operations are frozen in v1.0")
-    if not policy.require_confirmation_for_completed_actions:
-        raise ConfigError("Completed action records must require user confirmation")
-    if not policy.require_confirmation_for_confirmed_action_updates:
-        raise ConfigError("Confirmed action updates must require user confirmation")
+    if not policy.require_confirmation_for_event_completion_updates:
+        raise ConfigError("Calendar event completion updates must require user confirmation")
+    if not policy.require_confirmation_for_reminder_completion:
+        raise ConfigError("Reminder completion must require user confirmation")
     return policy
 
 
@@ -257,10 +264,16 @@ def _parse_calendar_sources(raw_sources: object) -> tuple[CalendarSource, ...]:
 def _parse_calendar_source(raw_source: object) -> CalendarSource:
     if not isinstance(raw_source, dict):
         raise ConfigError("Each calendar_sources entry must be a TOML table")
+    _reject_unknown_keys(
+        raw_source,
+        {"calendar_id", "title", "allow_write"},
+        "calendar source",
+    )
 
     calendar_id = raw_source.get("calendar_id")
     if not isinstance(calendar_id, str) or not calendar_id.strip():
         raise ConfigError("Calendar calendar_id must be a non-empty string")
+    _reject_control_characters(calendar_id, "Calendar calendar_id")
 
     title = raw_source.get("title", calendar_id)
     if not isinstance(title, str) or not title.strip():
@@ -297,10 +310,16 @@ def _parse_reminder_sources(raw_sources: object) -> tuple[ReminderSource, ...]:
 def _parse_reminder_source(raw_source: object) -> ReminderSource:
     if not isinstance(raw_source, dict):
         raise ConfigError("Each reminder_sources entry must be a TOML table")
+    _reject_unknown_keys(
+        raw_source,
+        {"list_id", "title", "allow_write"},
+        "reminder source",
+    )
 
     list_id = raw_source.get("list_id")
     if not isinstance(list_id, str) or not list_id.strip():
         raise ConfigError("Reminder list_id must be a non-empty string")
+    _reject_control_characters(list_id, "Reminder list_id")
 
     title = raw_source.get("title", list_id)
     if not isinstance(title, str) or not title.strip():
@@ -315,3 +334,8 @@ def _parse_reminder_source(raw_source: object) -> ReminderSource:
         title=title.strip(),
         allow_write=allow_write,
     )
+
+
+def _reject_control_characters(value: str, field_name: str) -> None:
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ConfigError(f"{field_name} must not contain control characters")

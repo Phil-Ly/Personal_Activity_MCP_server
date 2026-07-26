@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
+from personal_activity_mcp.common import (
+    TargetRef,
+    ToolWarning,
+    decode_cursor,
+    paginate,
+    validate_limit,
+)
 from personal_activity_mcp.config import AppConfig
 from personal_activity_mcp.reminders.models import (
     ReminderCompleteResult,
@@ -16,7 +24,7 @@ from personal_activity_mcp.reminders.models import (
     ReminderRecord,
     ReminderTimeRange,
 )
-from personal_activity_mcp.sidecar import SidecarRepository
+from personal_activity_mcp.sidecar import ExternalItemContext, SidecarRepository
 from personal_activity_mcp.time_policy import require_aware_datetime
 
 
@@ -27,8 +35,10 @@ class ReminderBackend(Protocol):
         self,
         *,
         list_ids: list[str],
-        start_due_date: date | None,
-        end_due_date: date | None,
+        start_due_at: datetime | None,
+        end_due_at: datetime | None,
+        start_completed_at: datetime | None,
+        end_completed_at: datetime | None,
         include_completed: bool,
         include_notes: bool,
     ) -> list[ReminderRecord]: ...
@@ -62,6 +72,7 @@ class ReminderRepository:
         sidecar: SidecarRepository | None = None,
     ) -> None:
         self._reminder_sources = {source.list_id: source for source in config.reminder_sources}
+        self._default_timezone = ZoneInfo(config.default_timezone)
         self._backend = backend
         self._sidecar = sidecar
 
@@ -69,39 +80,67 @@ class ReminderRepository:
         self,
         *,
         list_ids: list[str] | None,
-        start_due_date: date | None,
-        end_due_date: date | None,
+        start_due_at: datetime | None,
+        end_due_at: datetime | None,
+        start_completed_at: datetime | None = None,
+        end_completed_at: datetime | None = None,
         include_completed: bool = False,
         include_notes: bool = False,
+        limit: int = 100,
+        cursor: str | None = None,
     ) -> ReminderListResult:
         """List reminder evidence from explicitly configured lists."""
-        if (
-            start_due_date is not None
-            and end_due_date is not None
-            and start_due_date > end_due_date
-        ):
-            raise ValueError("start_due_date must be on or before end_due_date")
+        _validate_optional_range(start_due_at, end_due_at, "due")
+        _validate_optional_range(start_completed_at, end_completed_at, "completion")
+        validate_limit(limit)
+        if cursor is not None:
+            decode_cursor(cursor)
         selected_list_ids = self._select_list_ids(list_ids)
         records = self._backend.list_reminders(
             list_ids=selected_list_ids,
-            start_due_date=start_due_date,
-            end_due_date=end_due_date,
+            start_due_at=start_due_at,
+            end_due_at=end_due_at,
+            start_completed_at=start_completed_at,
+            end_completed_at=end_completed_at,
             include_completed=include_completed,
             include_notes=include_notes,
         )
-        reminders = [
-            self._to_evidence(record, include_notes=include_notes)
+        records = [
+            record
             for record in records
-            if record.list_id in self._reminder_sources
-        ]
-        reminders.sort(
-            key=lambda reminder: (
-                reminder.due_date or date.max,
-                reminder.list_id,
-                reminder.reminder_id,
+            if record.list_id in set(selected_list_ids)
+            and _record_matches_query(
+                record,
+                timezone=self._default_timezone,
+                start_due_at=start_due_at,
+                end_due_at=end_due_at,
+                start_completed_at=start_completed_at,
+                end_completed_at=end_completed_at,
+                include_completed=include_completed,
             )
+        ]
+        records, warnings = _deduplicate_records(records)
+        sidecar_contexts = self._list_sidecar_contexts(records)
+        reminders = [
+            self._to_evidence(
+                record,
+                include_notes=include_notes,
+                sidecar_contexts=sidecar_contexts,
+            )
+            for record in records
+        ]
+        reminders.sort(key=_reminder_sort_key)
+        page, next_cursor = paginate(
+            reminders,
+            key=_reminder_page_key,
+            limit=limit,
+            cursor=cursor,
         )
-        return ReminderListResult(reminders=reminders, warnings=[])
+        return ReminderListResult(
+            reminders=page,
+            warnings=warnings,
+            next_cursor=next_cursor,
+        )
 
     def create_reminder(
         self,
@@ -326,26 +365,35 @@ class ReminderRepository:
             raise ValueError(f"Unknown reminder list_ids: {', '.join(unknown)}")
         return list_ids
 
-    def _to_evidence(self, record: ReminderRecord, *, include_notes: bool) -> ReminderEvidence:
-        sidecar_item = None
-        source_refs: list[str] = []
-        if self._sidecar is not None:
-            sidecar_item = self._sidecar.find_mcp_item_by_external(
-                item_type="reminder",
-                external_id=record.reminder_id,
-                external_calendar_or_list_id=record.list_id,
-            )
-            if sidecar_item is not None:
-                source_refs = self._sidecar.list_source_refs(str(sidecar_item["id"]))
+    def _to_evidence(
+        self,
+        record: ReminderRecord,
+        *,
+        include_notes: bool,
+        sidecar_contexts: dict[tuple[str, str, str], ExternalItemContext],
+    ) -> ReminderEvidence:
+        due_at = _normalize_due_at(record.due_date, self._default_timezone)
+        context = sidecar_contexts.get(("reminder", record.reminder_id, record.list_id))
+        sidecar_item = context.item if context is not None else None
+        source_refs = list(context.source_refs) if context is not None else []
         return ReminderEvidence(
             evidence_id=_reminder_evidence_id(record.list_id, record.reminder_id),
             source_id=record.list_id,
-            time_range=ReminderTimeRange(start=record.due_date, end=record.due_date),
+            time_range=ReminderTimeRange(start=due_at, end=due_at),
+            target_ref=TargetRef(
+                resource_type="reminder",
+                item_id=record.reminder_id,
+                container_id=record.list_id,
+            ),
+            state_token=_reminder_state_token(
+                record,
+                due_at=due_at,
+            ),
             title=record.title,
             reminder_id=record.reminder_id,
             list_id=record.list_id,
             notes=record.notes if include_notes else None,
-            due_date=record.due_date,
+            due_date=due_at,
             priority=record.priority,
             is_completed=record.is_completed,
             completion_date=record.completion_date,
@@ -353,6 +401,135 @@ class ReminderRepository:
             status_semantics="confirmed" if record.is_completed else "planned",
             source_refs=source_refs,
         )
+
+    def _list_sidecar_contexts(
+        self,
+        records: list[ReminderRecord],
+    ) -> dict[tuple[str, str, str], ExternalItemContext]:
+        if self._sidecar is None:
+            return {}
+        return self._sidecar.list_external_item_contexts(
+            item_types=("reminder",),
+            targets=[(record.reminder_id, record.list_id) for record in records],
+        )
+
+
+def _validate_optional_range(
+    start: datetime | None,
+    end: datetime | None,
+    field_name: str,
+) -> None:
+    if start is not None:
+        require_aware_datetime(start, f"start_{field_name}_at")
+    if end is not None:
+        require_aware_datetime(end, f"end_{field_name}_at")
+    if start is not None and end is not None and start > end:
+        raise ValueError(f"start_{field_name}_at must be on or before end_{field_name}_at")
+
+
+def _normalize_due_at(
+    value: datetime | date | None,
+    timezone: ZoneInfo,
+) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        require_aware_datetime(value, "record.due_date")
+        return value
+    return datetime.combine(value, time.min, tzinfo=timezone)
+
+
+def _record_matches_query(
+    record: ReminderRecord,
+    *,
+    timezone: ZoneInfo,
+    start_due_at: datetime | None,
+    end_due_at: datetime | None,
+    start_completed_at: datetime | None,
+    end_completed_at: datetime | None,
+    include_completed: bool,
+) -> bool:
+    if record.is_completed and not include_completed:
+        return False
+
+    due_at = _normalize_due_at(record.due_date, timezone)
+    if start_due_at is not None or end_due_at is not None:
+        if due_at is None:
+            return False
+        if start_due_at is not None and due_at < start_due_at:
+            return False
+        if end_due_at is not None and due_at > end_due_at:
+            return False
+
+    completed_at = record.completion_date
+    if start_completed_at is not None or end_completed_at is not None:
+        if completed_at is None:
+            return False
+        require_aware_datetime(completed_at, "record.completion_date")
+        if start_completed_at is not None and completed_at < start_completed_at:
+            return False
+        if end_completed_at is not None and completed_at > end_completed_at:
+            return False
+    return True
+
+
+def _deduplicate_records(
+    records: list[ReminderRecord],
+) -> tuple[list[ReminderRecord], list[ToolWarning]]:
+    grouped: dict[tuple[str, str], list[ReminderRecord]] = {}
+    for record in records:
+        grouped.setdefault((record.list_id, record.reminder_id), []).append(record)
+
+    unique_records: list[ReminderRecord] = []
+    warnings: list[ToolWarning] = []
+    for (list_id, reminder_id), matches in grouped.items():
+        first = matches[0]
+        if all(match == first for match in matches[1:]):
+            unique_records.append(first)
+            continue
+        warnings.append(
+            ToolWarning(
+                code="DUPLICATE_SOURCE_ITEM",
+                message="Conflicting Reminder records share the same source identity",
+                related_item_ids=[f"{list_id}:{reminder_id}"],
+            )
+        )
+    return unique_records, warnings
+
+
+def _reminder_state_token(
+    record: ReminderRecord,
+    *,
+    due_at: datetime | None,
+) -> str:
+    payload = {
+        "list_id": record.list_id,
+        "reminder_id": record.reminder_id,
+        "title": record.title,
+        "notes": record.notes,
+        "due_at": due_at.isoformat() if due_at else None,
+        "priority": record.priority,
+        "is_completed": record.is_completed,
+        "completion_date": record.completion_date.isoformat() if record.completion_date else None,
+    }
+    return f"reminder-state:{_request_hash(payload)}"
+
+
+def _reminder_sort_key(reminder: ReminderEvidence) -> tuple[datetime, str, str]:
+    return (
+        reminder.due_date or datetime.max.replace(tzinfo=UTC),
+        reminder.list_id,
+        reminder.reminder_id,
+    )
+
+
+def _reminder_page_key(reminder: ReminderEvidence) -> tuple[str, ...]:
+    due_key = (
+        reminder.due_date.astimezone(UTC).isoformat()
+        if reminder.due_date is not None
+        else "9999-12-31T23:59:59.999999+00:00"
+    )
+    return (due_key, reminder.list_id, reminder.reminder_id)
 
 
 def _reminder_evidence_id(list_id: str, reminder_id: str) -> str:

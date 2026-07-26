@@ -2,7 +2,7 @@ from pathlib import Path
 
 import anyio
 
-from personal_activity_mcp.calendar import CalendarEnsureRecord, CalendarEventRecord
+from personal_activity_mcp.calendar import CalendarEventRecord
 from personal_activity_mcp.reminders import ReminderRecord
 from personal_activity_mcp.server import create_server, main
 
@@ -11,7 +11,6 @@ class FakeCalendarBackend:
     def __init__(self) -> None:
         self.created_events: list[dict[str, object]] = []
         self.updated_events: list[dict[str, object]] = []
-        self.ensured_calendars: list[dict[str, object]] = []
 
     def list_events(
         self,
@@ -101,21 +100,6 @@ class FakeCalendarBackend:
             notes=notes,
         )
 
-    def ensure_calendar(
-        self, *, calendar_title: str, create_if_missing: bool
-    ) -> CalendarEnsureRecord:
-        self.ensured_calendars.append(
-            {
-                "calendar_title": calendar_title,
-                "create_if_missing": create_if_missing,
-            }
-        )
-        return CalendarEnsureRecord(
-            calendar_id=calendar_title,
-            calendar_title=calendar_title,
-            created=False,
-        )
-
 
 class FakeReminderBackend:
     def __init__(self) -> None:
@@ -126,8 +110,10 @@ class FakeReminderBackend:
         self,
         *,
         list_ids: list[str],
-        start_due_date,
-        end_due_date,
+        start_due_at,
+        end_due_at,
+        start_completed_at,
+        end_completed_at,
         include_completed: bool,
         include_notes: bool,
     ) -> list[ReminderRecord]:
@@ -137,7 +123,7 @@ class FakeReminderBackend:
                 list_id=list_ids[0],
                 title="Reminder demo",
                 notes="Private notes",
-                due_date=start_due_date,
+                due_date=start_due_at,
                 priority=5,
                 is_completed=False,
                 completion_date=None,
@@ -213,11 +199,6 @@ default_timezone = "Asia/Shanghai"
 calendar_id = "Personal"
 title = "Personal"
 allow_write = true
-
-[[calendar_sources]]
-calendar_id = "Personal Activity Log"
-title = "Personal Activity Log"
-allow_write = true
 """.strip(),
         encoding="utf-8",
     )
@@ -249,8 +230,6 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
         "calendar.list_events",
         "calendar.create_event",
         "calendar.update_event",
-        "activity.ensure_log_calendar",
-        "activity.record_completed_action",
         "reminders.list_reminders",
         "reminders.create_reminder",
         "reminders.complete_reminder",
@@ -309,46 +288,14 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
             "idempotency_key": "calendar:update:demo",
         },
     )
-    _, ensure_result = anyio.run(
-        server.call_tool,
-        "activity.ensure_log_calendar",
-        {
-            "calendar_title": "Personal Activity Log",
-            "create_if_missing": True,
-        },
-    )
-    _, activity_result = anyio.run(
-        server.call_tool,
-        "activity.record_completed_action",
-        {
-            "calendar_id": "Personal Activity Log",
-            "title": "MCP completed work",
-            "start": "2026-07-06T10:00:00+00:00",
-            "end": "2026-07-06T11:00:00+00:00",
-            "is_all_day": False,
-            "category": "engineering",
-            "project": "Personal Event MCP",
-            "notes": None,
-            "location": None,
-            "timezone": "Asia/Shanghai",
-            "source_refs": [],
-            "confirmed_by_user": True,
-            "idempotency_key": "activity:record:demo",
-        },
-    )
-
     assert list_result["events"][0]["event_id"] == "event-1"
     assert list_result["events"][0]["notes"] is None
     assert create_result["event_id"] == "created-event-1"
     assert create_result["created"] is True
     assert update_result["event_id"] == "created-event-1"
     assert update_result["updated"] is True
-    assert ensure_result["calendar_id"] == "Personal Activity Log"
-    assert activity_result["event_id"] == "created-event-1"
-    assert activity_result["status_semantics"] == "confirmed"
-    assert len(backend.created_events) == 2
+    assert len(backend.created_events) == 1
     assert len(backend.updated_events) == 1
-    assert len(backend.ensured_calendars) == 1
 
 
 def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path) -> None:
@@ -363,8 +310,8 @@ def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path
         "reminders.list_reminders",
         {
             "list_ids": ["Personal"],
-            "start_due_date": "2026-07-09",
-            "end_due_date": "2026-07-10",
+            "start_due_at": "2026-07-09T00:00:00+00:00",
+            "end_due_at": "2026-07-10T00:00:00+00:00",
         },
     )
     _, create_result = anyio.run(
@@ -410,3 +357,28 @@ def test_main_reports_missing_configuration_without_traceback(
     assert exit_code == 2
     assert "Configuration error: Configuration file not found" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_tool_failures_use_structured_public_error_contract(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    server = create_server(config_path)
+
+    result = anyio.run(
+        server.call_tool,
+        "calendar.list_events",
+        {
+            "calendar_ids": ["Secret"],
+            "start": "2026-07-08T09:00:00+00:00",
+            "end": "2026-07-08T18:00:00+00:00",
+        },
+    )
+
+    assert result.structuredContent == {
+        "code": "SOURCE_NOT_AUTHORIZED",
+        "message": "Requested source is not authorized",
+        "retryable": False,
+    }
+    assert result.isError is True
+    assert len(result.content) == 1
+    assert "Secret" not in result.content[0].text

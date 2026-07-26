@@ -9,15 +9,23 @@ from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from personal_activity_mcp.calendar.models import (
+    AllDayEventRange,
     CalendarCreateResult,
     CalendarEventEvidence,
     CalendarEventRecord,
     CalendarListResult,
-    CalendarTimeRange,
     CalendarUpdateResult,
+    TimedEventRange,
+)
+from personal_activity_mcp.common import (
+    TargetRef,
+    ToolWarning,
+    decode_cursor,
+    paginate,
+    validate_limit,
 )
 from personal_activity_mcp.config import AppConfig
-from personal_activity_mcp.sidecar import SidecarRepository
+from personal_activity_mcp.sidecar import ExternalItemContext, SidecarRepository
 from personal_activity_mcp.time_policy import Clock, SystemClock, require_aware_datetime
 
 
@@ -86,12 +94,17 @@ class CalendarRepository:
         end: datetime,
         include_notes: bool = False,
         include_location: bool = False,
+        limit: int = 100,
+        cursor: str | None = None,
     ) -> CalendarListResult:
         """List event evidence from explicitly configured Calendars."""
         require_aware_datetime(start, "start")
         require_aware_datetime(end, "end")
         if start >= end:
             raise ValueError("start must be before end")
+        validate_limit(limit)
+        if cursor is not None:
+            decode_cursor(cursor)
         selected_calendar_ids = self._select_calendar_ids(calendar_ids)
         records = self._backend.list_events(
             calendar_ids=selected_calendar_ids,
@@ -100,6 +113,10 @@ class CalendarRepository:
             include_notes=include_notes,
             include_location=include_location,
         )
+        records, warnings = _deduplicate_records(
+            [record for record in records if record.calendar_id in set(selected_calendar_ids)]
+        )
+        sidecar_contexts = self._list_sidecar_contexts(records)
         now = self._clock.now()
         require_aware_datetime(now, "clock.now()")
         events = [
@@ -108,12 +125,22 @@ class CalendarRepository:
                 include_notes=include_notes,
                 include_location=include_location,
                 now=now,
+                sidecar_contexts=sidecar_contexts,
             )
             for record in records
-            if record.calendar_id in self._calendar_sources
         ]
         events.sort(key=lambda event: (event.start, event.end, event.calendar_id, event.event_id))
-        return CalendarListResult(events=events, warnings=[])
+        page, next_cursor = paginate(
+            events,
+            key=_calendar_page_key,
+            limit=limit,
+            cursor=cursor,
+        )
+        return CalendarListResult(
+            events=page,
+            warnings=warnings,
+            next_cursor=next_cursor,
+        )
 
     def create_event(
         self,
@@ -423,21 +450,31 @@ class CalendarRepository:
         include_notes: bool,
         include_location: bool,
         now: datetime,
+        sidecar_contexts: dict[tuple[str, str, str], ExternalItemContext],
     ) -> CalendarEventEvidence:
-        sidecar_item = None
-        source_refs: list[str] = []
-        if self._sidecar is not None:
-            sidecar_item = self._sidecar_item_for_calendar_event(
-                external_id=record.event_id,
-                external_calendar_or_list_id=record.calendar_id,
+        context = sidecar_contexts.get(
+            ("calendar_event", record.event_id, record.calendar_id)
+        ) or sidecar_contexts.get(("action_record", record.event_id, record.calendar_id))
+        sidecar_item = context.item if context is not None else None
+        source_refs = list(context.source_refs) if context is not None else []
+        status_semantics = _status_semantics(record, now=now)
+        if record.is_all_day:
+            time_range = AllDayEventRange(
+                start_date=record.start_date or record.start.date(),
+                end_date=record.end_date or record.end.date(),
             )
-            if sidecar_item is not None:
-                source_refs = self._sidecar.list_source_refs(str(sidecar_item["id"]))
-        status_semantics = _status_semantics(record, sidecar_item, now=now)
+        else:
+            time_range = TimedEventRange(start=record.start, end=record.end)
         return CalendarEventEvidence(
             evidence_id=_calendar_evidence_id(record.calendar_id, record.event_id),
             source_id=record.calendar_id,
-            time_range=CalendarTimeRange(start=record.start, end=record.end),
+            time_range=time_range,
+            target_ref=TargetRef(
+                resource_type="calendar_event",
+                item_id=record.event_id,
+                container_id=record.calendar_id,
+            ),
+            state_token=_calendar_state_token(record),
             title=record.title,
             event_id=record.event_id,
             calendar_id=record.calendar_id,
@@ -448,7 +485,19 @@ class CalendarRepository:
             notes=record.notes if include_notes else None,
             created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
             status_semantics=status_semantics,
+            completion_status="unknown",
             source_refs=source_refs,
+        )
+
+    def _list_sidecar_contexts(
+        self,
+        records: list[CalendarEventRecord],
+    ) -> dict[tuple[str, str, str], ExternalItemContext]:
+        if self._sidecar is None:
+            return {}
+        return self._sidecar.list_external_item_contexts(
+            item_types=("calendar_event", "action_record"),
+            targets=[(record.event_id, record.calendar_id) for record in records],
         )
 
     def _sidecar_item_for_calendar_event(
@@ -480,14 +529,60 @@ def _calendar_evidence_id(calendar_id: str, event_id: str) -> str:
 
 def _status_semantics(
     record: CalendarEventRecord,
-    sidecar_item: dict[str, object] | None,
     *,
     now: datetime,
 ):
-    if sidecar_item is not None and sidecar_item["status_semantics"]:
-        return sidecar_item["status_semantics"]
     require_aware_datetime(record.end, "record.end")
-    return "probable" if record.end.astimezone(UTC) < now.astimezone(UTC) else "planned"
+    return "probable" if record.end.astimezone(UTC) <= now.astimezone(UTC) else "planned"
+
+
+def _deduplicate_records(
+    records: list[CalendarEventRecord],
+) -> tuple[list[CalendarEventRecord], list[ToolWarning]]:
+    grouped: dict[tuple[str, str], list[CalendarEventRecord]] = {}
+    for record in records:
+        grouped.setdefault((record.calendar_id, record.event_id), []).append(record)
+
+    unique_records: list[CalendarEventRecord] = []
+    warnings: list[ToolWarning] = []
+    for (calendar_id, event_id), matches in grouped.items():
+        first = matches[0]
+        if all(match == first for match in matches[1:]):
+            unique_records.append(first)
+            continue
+        warnings.append(
+            ToolWarning(
+                code="DUPLICATE_SOURCE_ITEM",
+                message="Conflicting Calendar records share the same source identity",
+                related_item_ids=[f"{calendar_id}:{event_id}"],
+            )
+        )
+    return unique_records, warnings
+
+
+def _calendar_state_token(record: CalendarEventRecord) -> str:
+    payload = {
+        "calendar_id": record.calendar_id,
+        "event_id": record.event_id,
+        "title": record.title,
+        "start": record.start.isoformat(),
+        "end": record.end.isoformat(),
+        "is_all_day": record.is_all_day,
+        "start_date": record.start_date.isoformat() if record.start_date else None,
+        "end_date": record.end_date.isoformat() if record.end_date else None,
+        "location": record.location,
+        "notes": record.notes,
+    }
+    return f"calendar-state:{_request_hash(payload)}"
+
+
+def _calendar_page_key(event: CalendarEventEvidence) -> tuple[str, ...]:
+    return (
+        event.start.astimezone(UTC).isoformat(),
+        event.end.astimezone(UTC).isoformat(),
+        event.calendar_id,
+        event.event_id,
+    )
 
 
 def _sidecar_status_semantics(sidecar_item: dict[str, object]) -> str:

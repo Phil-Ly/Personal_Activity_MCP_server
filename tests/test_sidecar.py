@@ -177,3 +177,52 @@ def test_records_opaque_source_reference_and_operation_audit(tmp_path: Path) -> 
     assert audit["request_hash"] == "request-hash-1"
     assert audit["result_status"] == "succeeded"
     assert audit["confirmed_by_user"] == 1
+
+
+def test_lists_external_item_contexts_in_one_batch(tmp_path: Path) -> None:
+    repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    repository.initialize()
+    repository.upsert_mcp_item(
+        item_id="calendar:event-1",
+        item_type="calendar_event",
+        external_id="event-1",
+        external_calendar_or_list_id="Personal",
+        title_hash="calendar-title",
+        time_start="2026-07-08T10:00:00+08:00",
+        time_end="2026-07-08T11:00:00+08:00",
+        status_semantics="planned",
+        created_by_mcp=True,
+    )
+    repository.upsert_mcp_item(
+        item_id="reminder:reminder-1",
+        item_type="reminder",
+        external_id="reminder-1",
+        external_calendar_or_list_id="Personal",
+        title_hash="reminder-title",
+        time_start=None,
+        time_end=None,
+        status_semantics="planned",
+        created_by_mcp=False,
+    )
+    repository.record_source_link(
+        target_item_id="calendar:event-1",
+        source_ref="file:daily/2026-07-26.md",
+        relation_type="created_from",
+    )
+
+    contexts = repository.list_external_item_contexts(
+        item_types=("calendar_event", "reminder"),
+        targets=[
+            ("event-1", "Personal"),
+            ("reminder-1", "Personal"),
+            ("missing", "Personal"),
+        ],
+    )
+
+    calendar = contexts[("calendar_event", "event-1", "Personal")]
+    reminder = contexts[("reminder", "reminder-1", "Personal")]
+    assert calendar.item["id"] == "calendar:event-1"
+    assert calendar.source_refs == ("file:daily/2026-07-26.md",)
+    assert reminder.item["id"] == "reminder:reminder-1"
+    assert reminder.source_refs == ()
+    assert len(contexts) == 2

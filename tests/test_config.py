@@ -61,7 +61,6 @@ def test_load_config_accepts_calendar_allowlist(tmp_path: Path) -> None:
         config_path,
         """
 default_timezone = "Asia/Shanghai"
-default_activity_log_calendar_id = "Personal Activity Log"
 
 [[calendar_sources]]
 calendar_id = "Personal"
@@ -78,7 +77,6 @@ allow_write = false
     config = load_config(config_path)
 
     assert config.default_timezone == "Asia/Shanghai"
-    assert config.default_activity_log_calendar_id == "Personal Activity Log"
     assert config.calendar_sources[0].calendar_id == "Personal"
     assert config.calendar_sources[0].title == "Personal"
     assert config.calendar_sources[0].allow_write is True
@@ -129,12 +127,13 @@ def test_load_config_defaults_to_private_and_strict_local_policy(tmp_path: Path)
     assert config.privacy.sensitive_logging_enabled is False
     assert config.privacy.log_calendar_notes is False
     assert config.privacy.log_reminder_notes is False
-    assert config.privacy.log_llm_outputs is False
+    assert config.privacy.log_candidate_data is False
+    assert config.privacy.log_source_refs is False
     assert config.security.allow_remote_transport is False
     assert config.security.allow_bulk_operations is False
     assert config.security.allow_delete_operations is False
-    assert config.security.require_confirmation_for_completed_actions is True
-    assert config.security.require_confirmation_for_confirmed_action_updates is True
+    assert config.security.require_confirmation_for_event_completion_updates is True
+    assert config.security.require_confirmation_for_reminder_completion is True
 
 
 def test_load_config_accepts_explicit_privacy_and_security_policy(tmp_path: Path) -> None:
@@ -146,14 +145,15 @@ def test_load_config_accepts_explicit_privacy_and_security_policy(tmp_path: Path
 sensitive_logging_enabled = false
 log_calendar_notes = false
 log_reminder_notes = false
-log_llm_outputs = false
+log_candidate_data = false
+log_source_refs = false
 
 [security]
 allow_remote_transport = false
 allow_bulk_operations = false
 allow_delete_operations = false
-require_confirmation_for_completed_actions = true
-require_confirmation_for_confirmed_action_updates = true
+require_confirmation_for_event_completion_updates = true
+require_confirmation_for_reminder_completion = true
 """,
     )
 
@@ -161,7 +161,7 @@ require_confirmation_for_confirmed_action_updates = true
 
     assert config.privacy.sensitive_logging_enabled is False
     assert config.security.allow_delete_operations is False
-    assert config.security.require_confirmation_for_completed_actions is True
+    assert config.security.require_confirmation_for_reminder_completion is True
 
 
 def test_load_config_rejects_unknown_privacy_keys(tmp_path: Path) -> None:
@@ -224,13 +224,87 @@ def test_load_config_rejects_security_policy_that_disables_required_confirmation
         config_path,
         """
 [security]
-require_confirmation_for_completed_actions = false
+require_confirmation_for_reminder_completion = false
 """,
     )
 
     with pytest.raises(
         ConfigError,
-        match="Completed action records must require user confirmation",
+        match="Reminder completion must require user confirmation",
+    ):
+        load_config(config_path)
+
+
+def test_load_config_rejects_unknown_security_keys(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        """
+[security]
+trust_agent_confirmation = true
+""",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="Unknown security keys: trust_agent_confirmation",
+    ):
+        load_config(config_path)
+
+
+def test_load_config_rejects_unknown_source_keys(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        """
+[[calendar_sources]]
+calendar_id = "Personal"
+filesystem_path = "/tmp/calendar"
+""",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="Unknown calendar source keys: filesystem_path",
+    ):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("section", "identifier_field"),
+    [
+        ("calendar_sources", "calendar_id"),
+        ("reminder_sources", "list_id"),
+    ],
+)
+def test_load_config_rejects_control_characters_in_source_identifiers(
+    tmp_path: Path,
+    section: str,
+    identifier_field: str,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        f"""
+[[{section}]]
+{identifier_field} = "Personal\\nWork"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="must not contain control characters"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_removed_activity_log_setting(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        'default_activity_log_calendar_id = "Personal Activity Log"',
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="Unknown configuration keys: default_activity_log_calendar_id",
     ):
         load_config(config_path)
 

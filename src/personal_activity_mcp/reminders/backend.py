@@ -25,8 +25,10 @@ class MacOSReminderBackend:
         self,
         *,
         list_ids: list[str],
-        start_due_date: date | None,
-        end_due_date: date | None,
+        start_due_at: datetime | None,
+        end_due_at: datetime | None,
+        start_completed_at: datetime | None,
+        end_completed_at: datetime | None,
         include_completed: bool,
         include_notes: bool,
     ) -> list[ReminderRecord]:
@@ -34,8 +36,10 @@ class MacOSReminderBackend:
             _LIST_REMINDERS_JXA,
             [
                 "\n".join(list_ids),
-                start_due_date.isoformat() if start_due_date else "",
-                end_due_date.isoformat() if end_due_date else "",
+                start_due_at.isoformat() if start_due_at else "",
+                end_due_at.isoformat() if end_due_at else "",
+                start_completed_at.isoformat() if start_completed_at else "",
+                end_completed_at.isoformat() if end_completed_at else "",
                 "true" if include_completed else "false",
                 "true" if include_notes else "false",
             ],
@@ -109,7 +113,7 @@ class MacOSReminderBackend:
 def _record_from_payload(row: Any) -> ReminderRecord:
     if not isinstance(row, dict):
         raise ReminderBackendError("Reminder row must be an object")
-    due_date = date.fromisoformat(str(row["due_date"])) if row.get("due_date") else None
+    due_date = datetime.fromisoformat(str(row["due_date"])) if row.get("due_date") else None
     completion_date = (
         datetime.fromisoformat(str(row["completion_date"])) if row.get("completion_date") else None
     )
@@ -140,10 +144,11 @@ _LIST_REMINDERS_JXA = (
     + r"""
 function run(argv) {
   const listIds = argv[0].split("\n").filter(Boolean);
-  const startDue = argv[1] ? new Date(argv[1] + "T00:00:00") : null;
-  const endDue = argv[2] ? new Date(argv[2] + "T23:59:59") : null;
-  const includeCompleted = argv[3] === "true";
-  const includeNotes = argv[4] === "true";
+  const startDue = argv[1] ? new Date(argv[1]) : null;
+  const endDue = argv[2] ? new Date(argv[2]) : null;
+  const startCompleted = argv[3] ? new Date(argv[3]) : null;
+  const endCompleted = argv[4] ? new Date(argv[4]) : null;
+  const includeCompleted = argv[5] === "true";
   const Reminders = Application("Reminders");
   const rows = [];
   Reminders.lists().forEach(function(list) {
@@ -157,21 +162,34 @@ function run(argv) {
         return;
       }
       const due = reminder.dueDate();
+      if (!due && (startDue || endDue)) {
+        return;
+      }
       if (due && startDue && due < startDue) {
         return;
       }
       if (due && endDue && due > endDue) {
         return;
       }
+      const completionDate = reminder.completionDate();
+      if (!completionDate && (startCompleted || endCompleted)) {
+        return;
+      }
+      if (completionDate && startCompleted && completionDate < startCompleted) {
+        return;
+      }
+      if (completionDate && endCompleted && completionDate > endCompleted) {
+        return;
+      }
       rows.push({
         reminder_id: reminder.id(),
         list_id: listName,
         title: reminder.name(),
-        notes: includeNotes ? reminder.body() : null,
-        due_date: due ? formatLocalDate(due) : null,
+        notes: reminder.body(),
+        due_date: due ? due.toISOString() : null,
         priority: reminder.priority(),
         is_completed: completed,
-        completion_date: reminder.completionDate() ? reminder.completionDate().toISOString() : null
+        completion_date: completionDate ? completionDate.toISOString() : null
       });
     });
   });
@@ -204,7 +222,7 @@ function run(argv) {
     list_id: listId,
     title: reminder.name(),
     notes: notes,
-    due_date: dueDate ? formatLocalDate(dueDate) : null,
+    due_date: dueDate ? dueDate.toISOString() : null,
     priority: reminder.priority(),
     is_completed: reminder.completed(),
     completion_date: null
@@ -237,7 +255,7 @@ function run(argv) {
           list_id: listName,
           title: reminder.name(),
           notes: null,
-          due_date: due ? formatLocalDate(due) : null,
+          due_date: due ? due.toISOString() : null,
           priority: reminder.priority(),
           is_completed: reminder.completed(),
           completion_date: completionDate.toISOString()

@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -20,16 +21,20 @@ class FakeReminderBackend:
         self,
         *,
         list_ids: list[str],
-        start_due_date: date | None,
-        end_due_date: date | None,
+        start_due_at: datetime | None,
+        end_due_at: datetime | None,
+        start_completed_at: datetime | None,
+        end_completed_at: datetime | None,
         include_completed: bool,
         include_notes: bool,
     ) -> list[ReminderRecord]:
         self.list_calls.append(
             {
                 "list_ids": list_ids,
-                "start_due_date": start_due_date,
-                "end_due_date": end_due_date,
+                "start_due_at": start_due_at,
+                "end_due_at": end_due_at,
+                "start_completed_at": start_completed_at,
+                "end_completed_at": end_completed_at,
                 "include_completed": include_completed,
                 "include_notes": include_notes,
             }
@@ -120,15 +125,17 @@ def test_list_reminders_queries_only_allowed_lists_without_notes_by_default(
 
     result = repository.list_reminders(
         list_ids=["Personal"],
-        start_due_date=date(2026, 7, 8),
-        end_due_date=date(2026, 7, 10),
+        start_due_at=datetime(2026, 7, 8, tzinfo=UTC),
+        end_due_at=datetime(2026, 7, 10, 23, 59, tzinfo=UTC),
     )
 
     assert backend.list_calls == [
         {
             "list_ids": ["Personal"],
-            "start_due_date": date(2026, 7, 8),
-            "end_due_date": date(2026, 7, 10),
+            "start_due_at": datetime(2026, 7, 8, tzinfo=UTC),
+            "end_due_at": datetime(2026, 7, 10, 23, 59, tzinfo=UTC),
+            "start_completed_at": None,
+            "end_completed_at": None,
             "include_completed": False,
             "include_notes": False,
         }
@@ -140,6 +147,18 @@ def test_list_reminders_queries_only_allowed_lists_without_notes_by_default(
     assert evidence.source_id == "Personal"
     assert evidence.reminder_id == "reminder-1"
     assert evidence.list_id == "Personal"
+    assert evidence.target_ref.model_dump() == {
+        "resource_type": "reminder",
+        "item_id": "reminder-1",
+        "container_id": "Personal",
+    }
+    assert evidence.state_token
+    assert evidence.due_date == datetime(
+        2026,
+        7,
+        9,
+        tzinfo=ZoneInfo("Asia/Shanghai"),
+    )
     assert evidence.status_semantics == "planned"
     assert evidence.created_by_mcp is False
     assert evidence.source_refs == []
@@ -162,8 +181,8 @@ def test_list_reminders_marks_completed_as_confirmed(tmp_path: Path) -> None:
 
     result = repository.list_reminders(
         list_ids=["Personal"],
-        start_due_date=None,
-        end_due_date=None,
+        start_due_at=None,
+        end_due_at=None,
         include_completed=True,
     )
 
@@ -179,9 +198,200 @@ def test_list_reminders_rejects_unconfigured_list(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unknown reminder list_ids: Secret"):
         repository.list_reminders(
             list_ids=["Secret"],
-            start_due_date=None,
-            end_due_date=None,
+            start_due_at=None,
+            end_due_at=None,
         )
+
+
+def test_list_reminders_excludes_items_without_due_date_from_due_range(
+    tmp_path: Path,
+) -> None:
+    reminder = ReminderRecord(
+        reminder_id="reminder-without-due",
+        list_id="Personal",
+        title="No due date",
+        notes=None,
+        due_date=None,
+        priority=None,
+        is_completed=False,
+        completion_date=None,
+    )
+    repository = ReminderRepository(
+        make_config(tmp_path),
+        FakeReminderBackend([reminder]),
+    )
+
+    result = repository.list_reminders(
+        list_ids=["Personal"],
+        start_due_at=datetime(2026, 7, 8, tzinfo=UTC),
+        end_due_at=datetime(2026, 7, 10, tzinfo=UTC),
+    )
+
+    assert result.reminders == []
+
+
+def test_list_reminders_filters_by_completion_time_without_due_date(
+    tmp_path: Path,
+) -> None:
+    inside = ReminderRecord(
+        reminder_id="inside",
+        list_id="Personal",
+        title="Completed inside period",
+        notes=None,
+        due_date=None,
+        priority=None,
+        is_completed=True,
+        completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
+    )
+    outside = inside.model_copy(
+        update={
+            "reminder_id": "outside",
+            "completion_date": datetime(2026, 7, 11, 12, tzinfo=UTC),
+        }
+    )
+    repository = ReminderRepository(
+        make_config(tmp_path),
+        FakeReminderBackend([inside, outside]),
+    )
+
+    result = repository.list_reminders(
+        list_ids=["Personal"],
+        start_due_at=None,
+        end_due_at=None,
+        start_completed_at=datetime(2026, 7, 9, tzinfo=UTC),
+        end_completed_at=datetime(2026, 7, 9, 23, 59, tzinfo=UTC),
+        include_completed=True,
+    )
+
+    assert [reminder.reminder_id for reminder in result.reminders] == ["inside"]
+
+
+def test_list_reminders_excludes_backend_records_outside_selected_lists(
+    tmp_path: Path,
+) -> None:
+    reminder = ReminderRecord(
+        reminder_id="work-item",
+        list_id="Work",
+        title="Work item",
+        notes=None,
+        due_date=None,
+        priority=None,
+        is_completed=False,
+        completion_date=None,
+    )
+    repository = ReminderRepository(
+        make_config(tmp_path),
+        FakeReminderBackend([reminder]),
+    )
+
+    result = repository.list_reminders(
+        list_ids=["Personal"],
+        start_due_at=None,
+        end_due_at=None,
+    )
+
+    assert result.reminders == []
+
+
+def test_list_reminders_deduplicates_identical_records_and_warns_on_conflicts(
+    tmp_path: Path,
+) -> None:
+    identical = ReminderRecord(
+        reminder_id="reminder-1",
+        list_id="Personal",
+        title="Same reminder",
+        notes=None,
+        due_date=datetime(2026, 7, 9, 9, tzinfo=UTC),
+        priority=5,
+        is_completed=False,
+        completion_date=None,
+    )
+    conflict_a = identical.model_copy(update={"reminder_id": "reminder-2", "title": "First title"})
+    conflict_b = conflict_a.model_copy(update={"title": "Conflicting title"})
+    repository = ReminderRepository(
+        make_config(tmp_path),
+        FakeReminderBackend([identical, identical.model_copy(), conflict_a, conflict_b]),
+    )
+
+    result = repository.list_reminders(
+        list_ids=["Personal"],
+        start_due_at=None,
+        end_due_at=None,
+    )
+
+    assert [reminder.reminder_id for reminder in result.reminders] == ["reminder-1"]
+    assert [warning.model_dump() for warning in result.warnings] == [
+        {
+            "code": "DUPLICATE_SOURCE_ITEM",
+            "message": "Conflicting Reminder records share the same source identity",
+            "related_item_ids": ["Personal:reminder-2"],
+        }
+    ]
+
+
+def test_list_reminders_uses_stable_bounded_cursor_pagination(tmp_path: Path) -> None:
+    reminders = [
+        ReminderRecord(
+            reminder_id=f"reminder-{index}",
+            list_id="Personal",
+            title=f"Reminder {index}",
+            notes=None,
+            due_date=datetime(2026, 7, 9 + index, 9, tzinfo=UTC),
+            priority=None,
+            is_completed=False,
+            completion_date=None,
+        )
+        for index in range(3)
+    ]
+    repository = ReminderRepository(
+        make_config(tmp_path),
+        FakeReminderBackend(reminders),
+    )
+    query = {
+        "list_ids": ["Personal"],
+        "start_due_at": None,
+        "end_due_at": None,
+        "limit": 2,
+    }
+
+    first = repository.list_reminders(**query)
+    second = repository.list_reminders(**query, cursor=first.next_cursor)
+
+    assert [reminder.reminder_id for reminder in first.reminders] == [
+        "reminder-0",
+        "reminder-1",
+    ]
+    assert first.next_cursor is not None
+    assert [reminder.reminder_id for reminder in second.reminders] == ["reminder-2"]
+    assert second.next_cursor is None
+
+
+@pytest.mark.parametrize(
+    ("limit", "cursor", "message"),
+    [
+        (201, None, "limit must be between 1 and 200"),
+        (100, "invalid-cursor", "cursor is invalid"),
+    ],
+)
+def test_list_reminders_rejects_invalid_pagination_before_backend(
+    tmp_path: Path,
+    limit: int,
+    cursor: str | None,
+    message: str,
+) -> None:
+    backend = FakeReminderBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend)
+
+    with pytest.raises(ValueError, match=message):
+        repository.list_reminders(
+            list_ids=["Personal"],
+            start_due_at=None,
+            end_due_at=None,
+            limit=limit,
+            cursor=cursor,
+        )
+
+    assert backend.list_calls == []
 
 
 def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path) -> None:

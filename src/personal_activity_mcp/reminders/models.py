@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
+
+from personal_activity_mcp.common import TargetRef, ToolWarning
 
 
 class ReminderTimeRange(BaseModel):
     """Reminder evidence date range."""
 
-    start: date | None
-    end: date | None
+    start: AwareDatetime | None
+    end: AwareDatetime | None
 
 
 class ReminderRecord(BaseModel):
@@ -22,10 +24,10 @@ class ReminderRecord(BaseModel):
     list_id: str
     title: str
     notes: str | None
-    due_date: date | None
+    due_date: AwareDatetime | date | None
     priority: int | None
     is_completed: bool
-    completion_date: datetime | None
+    completion_date: AwareDatetime | None
 
 
 class ReminderEvidence(BaseModel):
@@ -35,15 +37,17 @@ class ReminderEvidence(BaseModel):
     source_type: Literal["reminder"] = "reminder"
     source_id: str
     time_range: ReminderTimeRange
+    target_ref: TargetRef
+    state_token: str
     title: str
     metadata: dict[str, object] = Field(default_factory=dict)
     reminder_id: str
     list_id: str
     notes: str | None
-    due_date: date | None
+    due_date: AwareDatetime | None
     priority: int | None
     is_completed: bool
-    completion_date: datetime | None
+    completion_date: AwareDatetime | None
     created_by_mcp: bool
     status_semantics: Literal["planned", "confirmed"]
     source_refs: list[str]
@@ -53,7 +57,8 @@ class ReminderListResult(BaseModel):
     """Reminder query result."""
 
     reminders: list[ReminderEvidence]
-    warnings: list[str]
+    warnings: list[ToolWarning]
+    next_cursor: str | None = None
 
 
 class ReminderCreateResult(BaseModel):
@@ -73,6 +78,6 @@ class ReminderCompleteResult(BaseModel):
 
     reminder_id: str
     is_completed: bool
-    completion_date: datetime
+    completion_date: AwareDatetime
     status_semantics: Literal["confirmed"]
     audit_id: str

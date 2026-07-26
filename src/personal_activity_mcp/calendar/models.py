@@ -2,17 +2,34 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+from datetime import date
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
+
+from personal_activity_mcp.common import TargetRef, ToolWarning
 
 
-class CalendarTimeRange(BaseModel):
-    """Calendar event time range."""
+class TimedEventRange(BaseModel):
+    """A Calendar event with exact instants."""
 
-    start: datetime
-    end: datetime
+    kind: Literal["timed"] = "timed"
+    start: AwareDatetime
+    end: AwareDatetime
+
+
+class AllDayEventRange(BaseModel):
+    """A Calendar all-day event expressed in local calendar dates."""
+
+    kind: Literal["all_day"] = "all_day"
+    start_date: date
+    end_date: date
+
+
+CalendarTimeRange = Annotated[
+    TimedEventRange | AllDayEventRange,
+    Field(discriminator="kind"),
+]
 
 
 class CalendarEventRecord(BaseModel):
@@ -21,19 +38,13 @@ class CalendarEventRecord(BaseModel):
     event_id: str
     calendar_id: str
     title: str
-    start: datetime
-    end: datetime
+    start: AwareDatetime
+    end: AwareDatetime
     is_all_day: bool
+    start_date: date | None = None
+    end_date: date | None = None
     location: str | None = None
     notes: str | None = None
-
-
-class CalendarEnsureRecord(BaseModel):
-    """Raw Calendar ensure result returned by a Calendar backend."""
-
-    calendar_id: str
-    calendar_title: str
-    created: bool
 
 
 class CalendarEventEvidence(BaseModel):
@@ -43,17 +54,20 @@ class CalendarEventEvidence(BaseModel):
     source_type: Literal["calendar"] = "calendar"
     source_id: str
     time_range: CalendarTimeRange
+    target_ref: TargetRef
+    state_token: str
     title: str
     metadata: dict[str, object] = Field(default_factory=dict)
     event_id: str
     calendar_id: str
-    start: datetime
-    end: datetime
+    start: AwareDatetime
+    end: AwareDatetime
     is_all_day: bool
     location: str | None
     notes: str | None
     created_by_mcp: bool
     status_semantics: Literal["planned", "probable", "confirmed"]
+    completion_status: Literal["unknown", "incomplete", "completed"]
     source_refs: list[str]
 
 
@@ -61,7 +75,8 @@ class CalendarListResult(BaseModel):
     """Calendar query result."""
 
     events: list[CalendarEventEvidence]
-    warnings: list[str]
+    warnings: list[ToolWarning]
+    next_cursor: str | None = None
 
 
 class CalendarCreateResult(BaseModel):

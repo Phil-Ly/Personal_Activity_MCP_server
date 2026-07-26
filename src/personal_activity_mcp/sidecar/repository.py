@@ -21,6 +21,14 @@ class IdempotencyDecision:
     result_item_id: str | None
 
 
+@dataclass(frozen=True)
+class ExternalItemContext:
+    """One external mapping and its opaque source references."""
+
+    item: dict[str, object]
+    source_refs: tuple[str, ...]
+
+
 class SidecarRepository:
     """Manage the local SQLite sidecar database."""
 
@@ -200,6 +208,78 @@ class SidecarRepository:
                 (target_item_id,),
             ).fetchall()
         return [str(row["source_ref"]) for row in rows]
+
+    def list_external_item_contexts(
+        self,
+        *,
+        item_types: tuple[str, ...],
+        targets: list[tuple[str, str]],
+    ) -> dict[tuple[str, str, str], ExternalItemContext]:
+        """Return external mappings and source refs without per-item queries."""
+        unique_item_types = tuple(dict.fromkeys(item_types))
+        unique_targets = tuple(dict.fromkeys(targets))
+        if not unique_item_types or not unique_targets:
+            return {}
+
+        item_type_placeholders = ", ".join("?" for _ in unique_item_types)
+        target_predicates = " OR ".join(
+            "(external_id = ? AND external_calendar_or_list_id = ?)" for _ in unique_targets
+        )
+        parameters: list[str] = list(unique_item_types)
+        for external_id, container_id in unique_targets:
+            parameters.extend((external_id, container_id))
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM mcp_item
+                WHERE deleted_at IS NULL
+                  AND item_type IN ({item_type_placeholders})
+                  AND ({target_predicates})
+                ORDER BY
+                    item_type,
+                    external_id,
+                    external_calendar_or_list_id,
+                    updated_at DESC,
+                    id
+                """,
+                parameters,
+            ).fetchall()
+            items: dict[tuple[str, str, str], dict[str, object]] = {}
+            for row in rows:
+                key = (
+                    str(row["item_type"]),
+                    str(row["external_id"]),
+                    str(row["external_calendar_or_list_id"]),
+                )
+                items.setdefault(key, dict(row))
+
+            item_ids = [str(item["id"]) for item in items.values()]
+            refs_by_item: dict[str, list[str]] = {item_id: [] for item_id in item_ids}
+            if item_ids:
+                item_id_placeholders = ", ".join("?" for _ in item_ids)
+                source_rows = connection.execute(
+                    f"""
+                    SELECT target_item_id, source_ref
+                    FROM source_link
+                    WHERE target_item_id IN ({item_id_placeholders})
+                    ORDER BY target_item_id, created_at, id
+                    """,
+                    item_ids,
+                ).fetchall()
+                for source_row in source_rows:
+                    refs_by_item[str(source_row["target_item_id"])].append(
+                        str(source_row["source_ref"])
+                    )
+
+        return {
+            key: ExternalItemContext(
+                item=item,
+                source_refs=tuple(refs_by_item[str(item["id"])]),
+            )
+            for key, item in items.items()
+        }
 
     def check_idempotency_key(
         self,

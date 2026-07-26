@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import subprocess
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from personal_activity_mcp.calendar.models import CalendarEnsureRecord, CalendarEventRecord
+from personal_activity_mcp.calendar.models import CalendarEventRecord
 
 
 class CalendarBackendError(RuntimeError):
@@ -107,25 +107,6 @@ class MacOSCalendarBackend:
             raise CalendarBackendError("Calendar update_event returned a non-object payload")
         return _record_from_payload(row)
 
-    def ensure_calendar(
-        self, *, calendar_title: str, create_if_missing: bool
-    ) -> CalendarEnsureRecord:
-        payload = self._run_jxa(
-            _ENSURE_CALENDAR_JXA,
-            [
-                calendar_title,
-                "true" if create_if_missing else "false",
-            ],
-        )
-        row = json.loads(payload)
-        if not isinstance(row, dict) or not row.get("calendar_id"):
-            raise CalendarBackendError("Calendar ensure_calendar returned an invalid payload")
-        return CalendarEnsureRecord(
-            calendar_id=str(row["calendar_id"]),
-            calendar_title=str(row.get("calendar_title") or row["calendar_id"]),
-            created=bool(row.get("created")),
-        )
-
     def _run_jxa(self, script: str, args: list[str]) -> str:
         try:
             result = subprocess.run(
@@ -153,18 +134,25 @@ def _record_from_payload(row: Any) -> CalendarEventRecord:
         start=datetime.fromisoformat(str(row["start"])),
         end=datetime.fromisoformat(str(row["end"])),
         is_all_day=bool(row["is_all_day"]),
+        start_date=date.fromisoformat(str(row["start_date"])) if row.get("start_date") else None,
+        end_date=date.fromisoformat(str(row["end_date"])) if row.get("end_date") else None,
         location=str(row["location"]) if row.get("location") else None,
         notes=str(row["notes"]) if row.get("notes") else None,
     )
 
 
 _LIST_EVENTS_JXA = r"""
+function formatLocalDate(value) {
+  const year = value.getFullYear();
+  const month = ("0" + (value.getMonth() + 1)).slice(-2);
+  const day = ("0" + value.getDate()).slice(-2);
+  return year + "-" + month + "-" + day;
+}
+
 function run(argv) {
   const calendarIds = argv[0].split("\n").filter(Boolean);
   const rangeStart = new Date(argv[1]);
   const rangeEnd = new Date(argv[2]);
-  const includeNotes = argv[3] === "true";
-  const includeLocation = argv[4] === "true";
   const Calendar = Application("Calendar");
   const rows = [];
   Calendar.calendars().forEach(function(calendar) {
@@ -176,15 +164,18 @@ function run(argv) {
       const eventStart = event.startDate();
       const eventEnd = event.endDate();
       if (eventStart < rangeEnd && eventEnd > rangeStart) {
+        const isAllDay = event.alldayEvent();
         rows.push({
           event_id: event.uid(),
           calendar_id: calendarName,
           title: event.summary(),
           start: eventStart.toISOString(),
           end: eventEnd.toISOString(),
-          is_all_day: event.alldayEvent(),
-          location: includeLocation ? event.location() : null,
-          notes: includeNotes ? event.description() : null
+          is_all_day: isAllDay,
+          start_date: isAllDay ? formatLocalDate(eventStart) : null,
+          end_date: isAllDay ? formatLocalDate(eventEnd) : null,
+          location: event.location(),
+          notes: event.description()
         });
       }
     });
@@ -272,33 +263,6 @@ function run(argv) {
     is_all_day: event.alldayEvent(),
     location: event.location(),
     notes: event.description()
-  });
-}
-"""
-
-
-_ENSURE_CALENDAR_JXA = r"""
-function run(argv) {
-  const calendarTitle = argv[0];
-  const createIfMissing = argv[1] === "true";
-  const Calendar = Application("Calendar");
-  const existing = Calendar.calendars.whose({name: calendarTitle})();
-  if (existing.length > 0) {
-    return JSON.stringify({
-      calendar_id: existing[0].name(),
-      calendar_title: existing[0].name(),
-      created: false
-    });
-  }
-  if (!createIfMissing) {
-    throw new Error("Calendar not found: " + calendarTitle);
-  }
-  const calendar = Calendar.Calendar({name: calendarTitle});
-  Calendar.calendars.push(calendar);
-  return JSON.stringify({
-    calendar_id: calendar.name(),
-    calendar_title: calendar.name(),
-    created: true
   });
 }
 """

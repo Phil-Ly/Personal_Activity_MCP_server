@@ -32,27 +32,24 @@ def test_real_stdio_session_exposes_no_local_file_capability(tmp_path: Path) -> 
                 prompts = await session.list_prompts()
                 templates = await session.list_resource_templates()
                 prompt = await session.get_prompt(
-                    "activity.daily_review",
-                    {"date": "2026-07-26"},
+                    "activity.review_summary",
+                    {
+                        "period_start": "2026-07-26T00:00:00+08:00",
+                        "period_end": "2026-07-27T00:00:00+08:00",
+                    },
                 )
 
         assert [tool.name for tool in tools.tools] == [
             "calendar.list_events",
             "calendar.create_event",
             "calendar.update_event",
-            "activity.ensure_log_calendar",
-            "activity.record_completed_action",
             "reminders.list_reminders",
             "reminders.create_reminder",
             "reminders.complete_reminder",
         ]
-        assert [prompt.name for prompt in prompts.prompts] == [
-            "activity.daily_review",
-            "activity.weekly_missing_review",
-            "activity.future_plan",
-        ]
+        assert [prompt.name for prompt in prompts.prompts] == ["activity.review_summary"]
         assert templates.resourceTemplates == []
-        assert "source_refs" in prompt.messages[0].content.text  # type: ignore[union-attr]
+        assert "past Calendar events" in prompt.messages[0].content.text  # type: ignore[union-attr]
         assert stderr_path.read_text(encoding="utf-8") == ""
 
     anyio.run(exercise_server)

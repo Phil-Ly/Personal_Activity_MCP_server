@@ -7,7 +7,6 @@
 # and operation audit rows. It must not store source bodies or LLM summaries.
 sidecar_path = "~/Library/Application Support/personal-activity-mcp/personal_activity.sqlite3"
 default_timezone = "Asia/Shanghai"
-default_activity_log_calendar_id = "Personal Activity Log"
 
 [privacy]
 # Sensitive logging is disabled by default. Keep all detail flags false unless
@@ -15,7 +14,8 @@ default_activity_log_calendar_id = "Personal Activity Log"
 sensitive_logging_enabled = false
 log_calendar_notes = false
 log_reminder_notes = false
-log_llm_outputs = false
+log_candidate_data = false
+log_source_refs = false
 
 [security]
 # v1.0 is local-stdio only. These options document the active safety policy;
@@ -23,8 +23,8 @@ log_llm_outputs = false
 allow_remote_transport = false
 allow_bulk_operations = false
 allow_delete_operations = false
-require_confirmation_for_completed_actions = true
-require_confirmation_for_confirmed_action_updates = true
+require_confirmation_for_event_completion_updates = true
+require_confirmation_for_reminder_completion = true
 
 [[calendar_sources]]
 # In the current macOS backend, calendar_id is the Calendar.app calendar name.
@@ -36,12 +36,6 @@ allow_write = true
 calendar_id = "Work"
 title = "Work"
 allow_write = false
-
-[[calendar_sources]]
-# Dedicated target for activity.record_completed_action.
-calendar_id = "Personal Activity Log"
-title = "Personal Activity Log"
-allow_write = true
 
 [[reminder_sources]]
 # In the current macOS backend, list_id is the Reminders.app list name.
