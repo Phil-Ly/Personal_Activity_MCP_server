@@ -8,6 +8,7 @@ from personal_activity_mcp.sidecar.repository import (
 from personal_activity_mcp.sidecar.write_control import (
     AuditWrite,
     McpItemWrite,
+    OperationResult,
     ReservationDecision,
     WriteControl,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "ExternalItemContext",
     "IdempotencyDecision",
     "McpItemWrite",
+    "OperationResult",
     "ReservationDecision",
     "SidecarRepository",
     "WriteControl",

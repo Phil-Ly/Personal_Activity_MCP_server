@@ -46,6 +46,11 @@ def test_real_stdio_session_exposes_no_local_file_capability(tmp_path: Path) -> 
             "reminders.list_reminders",
             "reminders.create_reminder",
             "reminders.complete_reminder",
+            "candidates.create",
+            "candidates.get",
+            "candidates.list",
+            "candidates.update",
+            "candidates.delete",
         ]
         assert [prompt.name for prompt in prompts.prompts] == ["activity.review_summary"]
         assert templates.resourceTemplates == []

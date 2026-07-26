@@ -233,9 +233,116 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
         "reminders.list_reminders",
         "reminders.create_reminder",
         "reminders.complete_reminder",
+        "candidates.create",
+        "candidates.get",
+        "candidates.list",
+        "candidates.update",
+        "candidates.delete",
     ]
     assert "reminders.delete_reminder" not in [tool.name for tool in tools]
     assert templates == []
+
+
+def test_candidate_tools_run_independently_and_preserve_authoritative_state(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    server = create_server(config_path)
+
+    _, create_result = anyio.run(
+        server.call_tool,
+        "candidates.create",
+        {
+            "command": {
+                "action_type": "create_task",
+                "payload": {"title": "Send review notes"},
+                "source_refs": ["file:daily/2026-07-28.md"],
+            }
+        },
+    )
+    candidate_id = create_result["candidate_id"]
+    _, get_result = anyio.run(
+        server.call_tool,
+        "candidates.get",
+        {"candidate_id": candidate_id},
+    )
+    _, list_result = anyio.run(
+        server.call_tool,
+        "candidates.list",
+        {"query": {"action_type": "create_task"}},
+    )
+    _, update_result = anyio.run(
+        server.call_tool,
+        "candidates.update",
+        {
+            "candidate_id": candidate_id,
+            "command": {
+                "expected_version": 1,
+                "decision_status": "confirmed",
+            },
+        },
+    )
+    _, delete_result = anyio.run(
+        server.call_tool,
+        "candidates.delete",
+        {
+            "candidate_id": candidate_id,
+            "expected_version": 2,
+        },
+    )
+
+    assert get_result == create_result
+    assert [item["candidate_id"] for item in list_result["candidates"]] == [candidate_id]
+    assert update_result["decision_status"] == "confirmed"
+    assert delete_result["deleted_at"] is not None
+    assert delete_result["version"] == 3
+
+
+def test_candidate_tool_returns_structured_version_conflict(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    server = create_server(config_path)
+    _, created = anyio.run(
+        server.call_tool,
+        "candidates.create",
+        {
+            "command": {
+                "action_type": "none",
+                "payload": {},
+            }
+        },
+    )
+    anyio.run(
+        server.call_tool,
+        "candidates.update",
+        {
+            "candidate_id": created["candidate_id"],
+            "command": {
+                "expected_version": 1,
+                "decision_status": "rejected",
+            },
+        },
+    )
+
+    result = anyio.run(
+        server.call_tool,
+        "candidates.update",
+        {
+            "candidate_id": created["candidate_id"],
+            "command": {
+                "expected_version": 1,
+                "route": {"provider": "external"},
+            },
+        },
+    )
+
+    assert result.isError is True
+    assert result.structuredContent == {
+        "code": "VERSION_CONFLICT",
+        "message": "ActionCandidate version has changed",
+        "retryable": False,
+    }
 
 
 def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path) -> None:

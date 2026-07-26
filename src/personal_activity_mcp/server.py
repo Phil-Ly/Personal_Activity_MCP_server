@@ -11,11 +11,13 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from personal_activity_mcp.calendar import CalendarRepository, MacOSCalendarBackend
+from personal_activity_mcp.candidates import CandidateRepository
 from personal_activity_mcp.config import ConfigError, load_config
 from personal_activity_mcp.prompts.activity import register_review_prompt
 from personal_activity_mcp.reminders import MacOSReminderBackend, ReminderRepository
 from personal_activity_mcp.sidecar import SidecarRepository
 from personal_activity_mcp.tools.calendar import register_calendar_tools
+from personal_activity_mcp.tools.candidates import register_candidate_tools
 from personal_activity_mcp.tools.reminders import register_reminder_tools
 
 DEFAULT_CONFIG_PATH = Path("~/.config/personal-activity-mcp/config.toml").expanduser()
@@ -44,17 +46,19 @@ def create_server(
         reminder_backend or MacOSReminderBackend(),
         sidecar,
     )
+    candidate_repository = CandidateRepository(sidecar)
     server = FastMCP(
         "Personal Activity MCP",
         instructions=(
-            "Access configured Calendar and Reminders capabilities without interpreting "
-            "user intent."
+            "Access configured Calendar and Reminders capabilities and persist "
+            "provider-neutral ActionCandidates without interpreting user intent."
         ),
         log_level="WARNING",
     )
 
     register_calendar_tools(server, calendar_repository)
     register_reminder_tools(server, reminder_repository)
+    register_candidate_tools(server, candidate_repository)
     register_review_prompt(server)
 
     return server

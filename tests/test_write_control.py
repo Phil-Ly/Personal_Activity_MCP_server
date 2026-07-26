@@ -276,3 +276,63 @@ def test_rejected_second_finalization_does_not_append_unknown_audit(
 
     assert status == "succeeded"
     assert [row["result_status"] for row in audits] == ["succeeded"]
+
+
+def test_operation_result_matches_audit_by_terminal_state_when_hashes_repeat(
+    tmp_path: Path,
+) -> None:
+    _, control = make_control(tmp_path)
+    control.reserve_operation(
+        idempotency_key="calendar:create:success",
+        operation="calendar.create_event",
+        request_hash="shared-request-hash",
+    )
+    success_audit = AuditWrite(
+        request_hash="shared-request-hash",
+        result_status="succeeded",
+        error_code=None,
+        confirmed_by_user=True,
+    )
+    control.finalize_success(
+        idempotency_key="calendar:create:success",
+        operation="calendar.create_event",
+        item=item_write(),
+        source_refs=[],
+        audit=success_audit,
+    )
+    control.reserve_operation(
+        idempotency_key="calendar:create:failure",
+        operation="calendar.create_event",
+        request_hash="shared-request-hash",
+    )
+    failure_audit = AuditWrite(
+        request_hash="shared-request-hash",
+        result_status="failed",
+        error_code="BACKEND_FAILURE",
+        confirmed_by_user=True,
+    )
+    control.finalize_failure(
+        idempotency_key="calendar:create:failure",
+        operation="calendar.create_event",
+        status="failed",
+        error_code="BACKEND_FAILURE",
+        audit=failure_audit,
+    )
+
+    success = control.get_operation_result(
+        idempotency_key="calendar:create:success",
+        operation="calendar.create_event",
+    )
+    failure = control.get_operation_result(
+        idempotency_key="calendar:create:failure",
+        operation="calendar.create_event",
+    )
+
+    assert success is not None
+    assert success.audit_id == success_audit.audit_id
+    assert success.audit_result_status == "succeeded"
+    assert success.audit_target_item_id == "calendar:event-1"
+    assert failure is not None
+    assert failure.audit_id == failure_audit.audit_id
+    assert failure.audit_result_status == "failed"
+    assert failure.audit_error_code == "BACKEND_FAILURE"

@@ -46,6 +46,22 @@ class AuditWrite(BaseModel):
     confirmed_by_user: bool
 
 
+class OperationResult(BaseModel):
+    status: Literal[
+        "pending",
+        "succeeded",
+        "failed",
+        "external_state_unknown",
+    ]
+    request_hash: str
+    result_item_id: str | None
+    error_code: str | None
+    audit_id: str | None
+    audit_result_status: str | None
+    audit_target_item_id: str | None
+    audit_error_code: str | None
+
+
 class WriteControl:
     def __init__(self, repository: SidecarRepository) -> None:
         self._repository = repository
@@ -276,6 +292,59 @@ class WriteControl:
                 operation=operation,
                 target_item_id=None,
             )
+
+    def get_operation_result(
+        self,
+        *,
+        idempotency_key: str,
+        operation: str,
+    ) -> OperationResult | None:
+        """Read one local write result and its latest matching audit without side effects."""
+        _require_non_empty(idempotency_key, "idempotency_key")
+        _require_non_empty(operation, "operation")
+        with self._repository.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT request_hash, status, result_item_id, error_code
+                FROM idempotency_key
+                WHERE key = ? AND operation = ?
+                """,
+                (idempotency_key, operation),
+            ).fetchone()
+            if row is None:
+                return None
+            audit = connection.execute(
+                """
+                SELECT id, result_status, target_item_id, error_code
+                FROM operation_audit
+                WHERE operation = ?
+                  AND request_hash = ?
+                  AND result_status = ?
+                  AND target_item_id IS ?
+                  AND error_code IS ?
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (
+                    operation,
+                    row["request_hash"],
+                    row["status"],
+                    row["result_item_id"],
+                    row["error_code"],
+                ),
+            ).fetchone()
+        return OperationResult(
+            status=str(row["status"]),
+            request_hash=str(row["request_hash"]),
+            result_item_id=_optional_string(row["result_item_id"]),
+            error_code=_optional_string(row["error_code"]),
+            audit_id=str(audit["id"]) if audit is not None else None,
+            audit_result_status=(str(audit["result_status"]) if audit is not None else None),
+            audit_target_item_id=(
+                _optional_string(audit["target_item_id"]) if audit is not None else None
+            ),
+            audit_error_code=(_optional_string(audit["error_code"]) if audit is not None else None),
+        )
 
     def _mark_external_state_unknown(
         self,
