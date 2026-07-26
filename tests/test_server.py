@@ -2,7 +2,7 @@ from pathlib import Path
 
 import anyio
 
-from personal_activity_mcp.calendar import CalendarEventRecord
+from personal_activity_mcp.calendar import CalendarEventRecord, DescriptionUpdate
 from personal_activity_mcp.reminders import ReminderRecord
 from personal_activity_mcp.server import create_server, main
 
@@ -11,6 +11,7 @@ class FakeCalendarBackend:
     def __init__(self) -> None:
         self.created_events: list[dict[str, object]] = []
         self.updated_events: list[dict[str, object]] = []
+        self.events: dict[tuple[str, str], CalendarEventRecord] = {}
 
     def list_events(
         self,
@@ -21,18 +22,18 @@ class FakeCalendarBackend:
         include_notes: bool,
         include_location: bool,
     ) -> list[CalendarEventRecord]:
-        return [
-            CalendarEventRecord(
-                event_id="event-1",
-                calendar_id=calendar_ids[0],
-                title="Calendar demo",
-                start=start,
-                end=end,
-                is_all_day=False,
-                location="Room 1",
-                notes="Private notes",
-            )
-        ]
+        record = CalendarEventRecord(
+            event_id="event-1",
+            calendar_id=calendar_ids[0],
+            title="Calendar demo",
+            start=start,
+            end=end,
+            is_all_day=False,
+            location="Room 1",
+            notes="Private notes",
+        )
+        self.events[(record.calendar_id, record.event_id)] = record
+        return [record]
 
     def create_event(
         self,
@@ -55,7 +56,7 @@ class FakeCalendarBackend:
                 "timezone": timezone,
             }
         )
-        return CalendarEventRecord(
+        record = CalendarEventRecord(
             event_id="created-event-1",
             calendar_id=calendar_id,
             title=title,
@@ -65,46 +66,46 @@ class FakeCalendarBackend:
             location=location,
             notes=notes,
         )
+        self.events[(record.calendar_id, record.event_id)] = record
+        return record
+
+    def get_event(
+        self,
+        *,
+        event_id: str,
+        calendar_id: str,
+    ) -> CalendarEventRecord:
+        return self.events[(calendar_id, event_id)]
 
     def update_event(
         self,
         *,
         event_id: str,
         calendar_id: str,
-        title: str | None,
-        start,
-        end,
-        is_all_day: bool | None,
-        notes: str | None,
-        location: str | None,
-        timezone: str,
+        description: DescriptionUpdate,
     ) -> CalendarEventRecord:
         self.updated_events.append(
             {
                 "event_id": event_id,
                 "calendar_id": calendar_id,
-                "title": title,
-                "start": start,
-                "end": end,
-                "timezone": timezone,
+                "description": description.model_dump(),
             }
         )
-        return CalendarEventRecord(
-            event_id=event_id,
-            calendar_id=calendar_id,
-            title=title or "Calendar demo",
-            start=start,
-            end=end,
-            is_all_day=bool(is_all_day),
-            location=location,
-            notes=notes,
+        current = self.events[(calendar_id, event_id)]
+        updated = current.model_copy(
+            update={
+                "notes": description.value if description.operation == "set" else None,
+            }
         )
+        self.events[(calendar_id, event_id)] = updated
+        return updated
 
 
 class FakeReminderBackend:
     def __init__(self) -> None:
         self.created_reminders: list[dict[str, object]] = []
         self.completed_reminders: list[dict[str, object]] = []
+        self.reminders: dict[tuple[str, str], ReminderRecord] = {}
 
     def list_reminders(
         self,
@@ -117,18 +118,18 @@ class FakeReminderBackend:
         include_completed: bool,
         include_notes: bool,
     ) -> list[ReminderRecord]:
-        return [
-            ReminderRecord(
-                reminder_id="reminder-1",
-                list_id=list_ids[0],
-                title="Reminder demo",
-                notes="Private notes",
-                due_date=start_due_at,
-                priority=5,
-                is_completed=False,
-                completion_date=None,
-            )
-        ]
+        record = ReminderRecord(
+            reminder_id="reminder-1",
+            list_id=list_ids[0],
+            title="Reminder demo",
+            notes="Private notes",
+            due_date=start_due_at,
+            priority=5,
+            is_completed=False,
+            completion_date=None,
+        )
+        self.reminders[(record.list_id, record.reminder_id)] = record
+        return [record]
 
     def create_reminder(
         self,
@@ -147,7 +148,7 @@ class FakeReminderBackend:
                 "priority": priority,
             }
         )
-        return ReminderRecord(
+        record = ReminderRecord(
             reminder_id="created-reminder-1",
             list_id=list_id,
             title=title,
@@ -157,31 +158,40 @@ class FakeReminderBackend:
             is_completed=False,
             completion_date=None,
         )
+        self.reminders[(record.list_id, record.reminder_id)] = record
+        return record
+
+    def get_reminder(
+        self,
+        *,
+        reminder_id: str,
+        list_id: str,
+    ) -> ReminderRecord:
+        return self.reminders[(list_id, reminder_id)]
 
     def complete_reminder(
         self,
         *,
         reminder_id: str,
-        list_ids: list[str],
+        list_id: str,
         completion_date,
     ) -> ReminderRecord:
         self.completed_reminders.append(
             {
                 "reminder_id": reminder_id,
-                "list_ids": list_ids,
+                "list_id": list_id,
                 "completion_date": completion_date,
             }
         )
-        return ReminderRecord(
-            reminder_id=reminder_id,
-            list_id=list_ids[0],
-            title="Reminder demo",
-            notes=None,
-            due_date=None,
-            priority=None,
-            is_completed=True,
-            completion_date=completion_date,
+        current = self.reminders[(list_id, reminder_id)]
+        record = current.model_copy(
+            update={
+                "is_completed": True,
+                "completion_date": completion_date,
+            }
         )
+        self.reminders[(list_id, reminder_id)] = record
+        return record
 
 
 def write_config(config_path: Path) -> None:
@@ -241,6 +251,24 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
     ]
     assert "reminders.delete_reminder" not in [tool.name for tool in tools]
     assert templates == []
+    calendar_update = next(tool for tool in tools if tool.name == "calendar.update_event")
+    assert set(calendar_update.inputSchema["properties"]) == {
+        "target_ref",
+        "description",
+        "completion_status",
+        "expected_state_token",
+        "source_refs",
+        "confirmed_by_user",
+        "idempotency_key",
+    }
+    reminder_complete = next(tool for tool in tools if tool.name == "reminders.complete_reminder")
+    assert set(reminder_complete.inputSchema["properties"]) == {
+        "target_ref",
+        "completion_date",
+        "expected_state_token",
+        "confirmed_by_user",
+        "idempotency_key",
+    }
 
 
 def test_candidate_tools_run_independently_and_preserve_authoritative_state(
@@ -381,15 +409,17 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
         server.call_tool,
         "calendar.update_event",
         {
-            "calendar_id": "Personal",
-            "event_id": "created-event-1",
-            "title": "Updated MCP demo",
-            "start": "2026-07-08T12:00:00+00:00",
-            "end": "2026-07-08T13:00:00+00:00",
-            "is_all_day": False,
-            "notes": None,
-            "location": None,
-            "timezone": "Asia/Shanghai",
+            "target_ref": {
+                "resource_type": "calendar_event",
+                "item_id": "created-event-1",
+                "container_id": "Personal",
+            },
+            "description": {
+                "operation": "set",
+                "value": "Updated notes",
+            },
+            "completion_status": None,
+            "expected_state_token": None,
             "source_refs": [],
             "confirmed_by_user": False,
             "idempotency_key": "calendar:update:demo",
@@ -438,8 +468,13 @@ def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path
         server.call_tool,
         "reminders.complete_reminder",
         {
-            "reminder_id": "created-reminder-1",
+            "target_ref": {
+                "resource_type": "reminder",
+                "item_id": "created-reminder-1",
+                "container_id": "Personal",
+            },
             "completion_date": "2026-07-09T12:00:00+00:00",
+            "expected_state_token": None,
             "confirmed_by_user": True,
             "idempotency_key": "reminder:complete:demo",
         },
@@ -451,6 +486,7 @@ def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path
     assert create_result["created"] is True
     assert complete_result["reminder_id"] == "created-reminder-1"
     assert complete_result["is_completed"] is True
+    assert complete_result["stable_id"] == create_result["stable_id"]
     assert len(backend.created_reminders) == 1
     assert len(backend.completed_reminders) == 1
 

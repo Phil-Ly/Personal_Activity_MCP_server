@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from personal_activity_mcp.common import TargetRef, ToolWarning
 
@@ -30,6 +30,23 @@ CalendarTimeRange = Annotated[
     TimedEventRange | AllDayEventRange,
     Field(discriminator="kind"),
 ]
+
+
+class DescriptionUpdate(BaseModel):
+    """Explicit set-or-clear patch for Apple Calendar notes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["set", "clear"]
+    value: str | None = None
+
+    @model_validator(mode="after")
+    def validate_operation(self) -> DescriptionUpdate:
+        if self.operation == "set" and (self.value is None or not self.value.strip()):
+            raise ValueError("description set requires a non-empty value")
+        if self.operation == "clear" and self.value is not None:
+            raise ValueError("description clear does not accept a value")
+        return self
 
 
 class CalendarEventRecord(BaseModel):
@@ -87,7 +104,7 @@ class CalendarCreateResult(BaseModel):
     stable_id: str
     created: bool
     deduplicated: bool
-    status_semantics: Literal["planned"]
+    status_semantics: Literal["planned", "probable"]
     source_refs: list[str]
 
 
@@ -100,7 +117,7 @@ class CalendarUpdateResult(BaseModel):
     updated: bool
     deduplicated: bool
     updated_fields: list[str]
-    requires_user_confirmation: bool
     status_semantics: Literal["planned", "probable", "confirmed"]
+    completion_status: Literal["unknown", "incomplete", "completed"]
     source_refs: list[str]
     audit_id: str | None

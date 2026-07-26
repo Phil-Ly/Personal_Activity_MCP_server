@@ -86,20 +86,35 @@ class MacOSReminderBackend:
         self,
         *,
         reminder_id: str,
-        list_ids: list[str],
+        list_id: str,
         completion_date: datetime,
     ) -> ReminderRecord:
         payload = self._run_jxa(
             _COMPLETE_REMINDER_JXA,
             [
+                list_id,
                 reminder_id,
-                "\n".join(list_ids),
                 completion_date.isoformat(),
             ],
         )
         row = json.loads(payload)
         if not isinstance(row, dict):
             raise ReminderBackendError("Reminders complete_reminder returned a non-object payload")
+        return _record_from_payload(row)
+
+    def get_reminder(
+        self,
+        *,
+        reminder_id: str,
+        list_id: str,
+    ) -> ReminderRecord:
+        payload = self._run_jxa(
+            _GET_REMINDER_JXA,
+            [list_id, reminder_id],
+        )
+        row = json.loads(payload)
+        if not isinstance(row, dict):
+            raise ReminderBackendError("Reminders get_reminder returned a non-object payload")
         return _record_from_payload(row)
 
     def _run_jxa(self, script: str, args: list[str]) -> str:
@@ -244,38 +259,63 @@ function run(argv) {
 )
 
 
+_GET_REMINDER_JXA = (
+    _LOCAL_DATE_FORMATTER_JXA
+    + r"""
+function run(argv) {
+  const listId = argv[0];
+  const reminderId = argv[1];
+  const Reminders = Application("Reminders");
+  const list = Reminders.lists.byName(listId);
+  for (const reminder of list.reminders()) {
+    if (reminder.id() === reminderId) {
+      const due = reminder.dueDate();
+      const completionDate = reminder.completionDate();
+      return JSON.stringify({
+        reminder_id: reminder.id(),
+        list_id: listId,
+        title: reminder.name(),
+        notes: reminder.body(),
+        due_date: due ? due.toISOString() : null,
+        priority: reminder.priority(),
+        is_completed: reminder.completed(),
+        completion_date: completionDate ? completionDate.toISOString() : null
+      });
+    }
+  }
+  throw new Error("Reminder not found in configured list");
+}
+"""
+)
+
+
 _COMPLETE_REMINDER_JXA = (
     _LOCAL_DATE_FORMATTER_JXA
     + r"""
 function run(argv) {
-  const reminderId = argv[0];
-  const listIds = argv[1].split("\n").filter(Boolean);
+  const listId = argv[0];
+  const reminderId = argv[1];
   const completionDate = new Date(argv[2]);
   const Reminders = Application("Reminders");
-  for (const list of Reminders.lists()) {
-    const listName = list.name();
-    if (listIds.indexOf(listName) === -1) {
-      continue;
-    }
-    for (const reminder of list.reminders()) {
-      if (reminder.id() === reminderId) {
-        reminder.completed = true;
-        reminder.completionDate = completionDate;
-        const due = reminder.dueDate();
-        return JSON.stringify({
-          reminder_id: reminder.id(),
-          list_id: listName,
-          title: reminder.name(),
-          notes: null,
-          due_date: due ? due.toISOString() : null,
-          priority: reminder.priority(),
-          is_completed: reminder.completed(),
-          completion_date: completionDate.toISOString()
-        });
-      }
+  const list = Reminders.lists.byName(listId);
+  for (const reminder of list.reminders()) {
+    if (reminder.id() === reminderId) {
+      reminder.completed = true;
+      reminder.completionDate = completionDate;
+      const due = reminder.dueDate();
+      return JSON.stringify({
+        reminder_id: reminder.id(),
+        list_id: listId,
+        title: reminder.name(),
+        notes: reminder.body(),
+        due_date: due ? due.toISOString() : null,
+        priority: reminder.priority(),
+        is_completed: reminder.completed(),
+        completion_date: reminder.completionDate().toISOString()
+      });
     }
   }
-  throw new Error("Reminder not found in configured lists");
+  throw new Error("Reminder not found in configured list");
 }
 """
 )

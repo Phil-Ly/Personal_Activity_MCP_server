@@ -9,6 +9,7 @@ from personal_activity_mcp.calendar.models import (
     CalendarListResult,
     CalendarTimeRange,
     CalendarUpdateResult,
+    DescriptionUpdate,
     TimedEventRange,
 )
 from personal_activity_mcp.calendar.repository import CalendarRepository
@@ -22,6 +23,7 @@ __all__ = [
     "CalendarRepository",
     "CalendarTimeRange",
     "CalendarUpdateResult",
+    "DescriptionUpdate",
     "TimedEventRange",
     "CalendarBackendError",
     "MacOSCalendarBackend",

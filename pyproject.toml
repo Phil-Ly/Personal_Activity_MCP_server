@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "personal-activity-mcp"
-version = "0.11.0"
+version = "0.12.0"
 description = "Local-only MCP server for personal activity data on macOS"
 requires-python = ">=3.11"
 dependencies = [

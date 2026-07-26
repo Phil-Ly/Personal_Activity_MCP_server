@@ -77,7 +77,10 @@ class ReminderCompleteResult(BaseModel):
     """Reminder completion result."""
 
     reminder_id: str
+    list_id: str
+    stable_id: str
     is_completed: bool
     completion_date: AwareDatetime
     status_semantics: Literal["confirmed"]
+    deduplicated: bool
     audit_id: str

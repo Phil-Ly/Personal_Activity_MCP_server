@@ -4,8 +4,13 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from personal_activity_mcp.common import TargetRef, ToolContractError
 from personal_activity_mcp.config import AppConfig, ReminderSource
-from personal_activity_mcp.reminders import ReminderRecord, ReminderRepository
+from personal_activity_mcp.reminders import (
+    ReminderBackendError,
+    ReminderRecord,
+    ReminderRepository,
+)
 from personal_activity_mcp.sidecar import SidecarRepository
 
 
@@ -14,6 +19,7 @@ class FakeReminderBackend:
         self.reminders = reminders or []
         self.list_calls: list[dict[str, object]] = []
         self.create_calls: list[dict[str, object]] = []
+        self.get_calls: list[dict[str, str]] = []
         self.complete_calls: list[dict[str, object]] = []
         self.next_created_reminder_id = "created-reminder-1"
 
@@ -59,7 +65,7 @@ class FakeReminderBackend:
                 "priority": priority,
             }
         )
-        return ReminderRecord(
+        record = ReminderRecord(
             reminder_id=self.next_created_reminder_id,
             list_id=list_id,
             title=title,
@@ -69,31 +75,89 @@ class FakeReminderBackend:
             is_completed=False,
             completion_date=None,
         )
+        self.reminders.append(record)
+        return record
+
+    def get_reminder(
+        self,
+        *,
+        reminder_id: str,
+        list_id: str,
+    ) -> ReminderRecord:
+        self.get_calls.append(
+            {
+                "reminder_id": reminder_id,
+                "list_id": list_id,
+            }
+        )
+        existing = next(
+            (
+                reminder
+                for reminder in self.reminders
+                if reminder.reminder_id == reminder_id and reminder.list_id == list_id
+            ),
+            None,
+        )
+        return existing or ReminderRecord(
+            reminder_id=reminder_id,
+            list_id=list_id,
+            title="MCP todo",
+            notes=None,
+            due_date=date(2026, 7, 9),
+            priority=5,
+            is_completed=False,
+            completion_date=None,
+        )
 
     def complete_reminder(
         self,
         *,
         reminder_id: str,
-        list_ids: list[str],
+        list_id: str,
         completion_date: datetime,
     ) -> ReminderRecord:
         self.complete_calls.append(
             {
                 "reminder_id": reminder_id,
-                "list_ids": list_ids,
+                "list_id": list_id,
                 "completion_date": completion_date,
             }
         )
-        return ReminderRecord(
-            reminder_id=reminder_id,
-            list_id=list_ids[0],
-            title="MCP todo",
-            notes=None,
-            due_date=date(2026, 7, 9),
-            priority=5,
-            is_completed=True,
-            completion_date=completion_date,
+        current = next(
+            (
+                reminder
+                for reminder in self.reminders
+                if reminder.reminder_id == reminder_id and reminder.list_id == list_id
+            ),
+            ReminderRecord(
+                reminder_id=reminder_id,
+                list_id=list_id,
+                title="MCP todo",
+                notes=None,
+                due_date=date(2026, 7, 9),
+                priority=5,
+                is_completed=False,
+                completion_date=None,
+            ),
         )
+        completed = current.model_copy(
+            update={
+                "is_completed": True,
+                "completion_date": completion_date,
+            }
+        )
+        self.reminders = [
+            completed
+            if reminder.reminder_id == reminder_id and reminder.list_id == list_id
+            else reminder
+            for reminder in self.reminders
+        ]
+        if not any(
+            reminder.reminder_id == reminder_id and reminder.list_id == list_id
+            for reminder in self.reminders
+        ):
+            self.reminders.append(completed)
+        return completed
 
 
 def make_config(tmp_path: Path) -> AppConfig:
@@ -451,6 +515,69 @@ def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path
     assert audit["operation"] == "reminders.create_reminder"
     assert audit["target_item_id"] == created.stable_id
     assert audit["result_status"] == "succeeded"
+    assert audit["confirmed_by_user"] == 0
+
+
+@pytest.mark.parametrize("priority", [-1, 2, 4, 10])
+def test_create_reminder_rejects_priority_outside_apple_values_before_backend(
+    tmp_path: Path,
+    priority: int,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeReminderBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ValueError, match="priority must be one of"):
+        repository.create_reminder(
+            list_id="Personal",
+            title="MCP todo",
+            notes=None,
+            due_date=None,
+            priority=priority,
+            source_refs=[],
+            idempotency_key=f"reminder:create:priority:{priority}",
+        )
+
+    assert backend.create_calls == []
+
+
+def test_create_reminder_marks_unverifiable_backend_result_unknown(
+    tmp_path: Path,
+) -> None:
+    class WrongListBackend(FakeReminderBackend):
+        def create_reminder(self, **kwargs) -> ReminderRecord:
+            record = super().create_reminder(**kwargs)
+            return record.model_copy(update={"list_id": "Work"})
+
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = WrongListBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ToolContractError) as unknown:
+        repository.create_reminder(
+            list_id="Personal",
+            title="MCP todo",
+            notes=None,
+            due_date=date(2026, 7, 9),
+            priority=5,
+            source_refs=[],
+            idempotency_key="reminder:create:wrong-result",
+        )
+
+    assert unknown.value.code == "EXTERNAL_STATE_UNKNOWN"
+    assert len(backend.create_calls) == 1
+    with sidecar.connect() as connection:
+        state = connection.execute(
+            """
+            SELECT status, error_code
+            FROM idempotency_key
+            WHERE key = ? AND operation = ?
+            """,
+            ("reminder:create:wrong-result", "reminders.create_reminder"),
+        ).fetchone()
+    assert tuple(state) == ("external_state_unknown", "EXTERNAL_STATE_UNKNOWN")
 
 
 def test_create_reminder_rejects_list_without_write_permission(tmp_path: Path) -> None:
@@ -492,18 +619,48 @@ def test_create_reminder_rejects_idempotency_conflict(tmp_path: Path) -> None:
             source_refs=[],
             idempotency_key="reminder:create:demo",
         )
+    with sidecar.connect() as connection:
+        blocked = connection.execute(
+            """
+            SELECT result_status, error_code
+            FROM operation_audit
+            WHERE operation = 'reminders.create_reminder'
+              AND result_status = 'blocked'
+            """
+        ).fetchone()
+    assert tuple(blocked) == ("blocked", "IDEMPOTENCY_CONFLICT")
 
 
 def test_complete_reminder_requires_confirmation(tmp_path: Path) -> None:
-    repository = ReminderRepository(make_config(tmp_path), FakeReminderBackend())
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeReminderBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
 
     with pytest.raises(ValueError, match="confirmed_by_user is required"):
         repository.complete_reminder(
-            reminder_id="reminder-1",
+            target_ref=TargetRef(
+                resource_type="reminder",
+                item_id="reminder-1",
+                container_id="Personal",
+            ),
             completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
+            expected_state_token=None,
             confirmed_by_user=False,
             idempotency_key="reminder:complete:demo",
         )
+
+    assert backend.get_calls == []
+    assert backend.complete_calls == []
+    with sidecar.connect() as connection:
+        audit = connection.execute(
+            """
+            SELECT error_code, result_status
+            FROM operation_audit
+            WHERE operation = 'reminders.complete_reminder'
+            """
+        ).fetchone()
+    assert tuple(audit) == ("USER_CONFIRMATION_REQUIRED", "blocked")
 
 
 def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Path) -> None:
@@ -514,14 +671,24 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
     completion_date = datetime(2026, 7, 9, 12, tzinfo=UTC)
 
     result = repository.complete_reminder(
-        reminder_id="reminder-1",
+        target_ref=TargetRef(
+            resource_type="reminder",
+            item_id="reminder-1",
+            container_id="Personal",
+        ),
         completion_date=completion_date,
+        expected_state_token=None,
         confirmed_by_user=True,
         idempotency_key="reminder:complete:demo",
     )
     repeated = repository.complete_reminder(
-        reminder_id="reminder-1",
+        target_ref=TargetRef(
+            resource_type="reminder",
+            item_id="reminder-1",
+            container_id="Personal",
+        ),
         completion_date=completion_date,
+        expected_state_token=None,
         confirmed_by_user=True,
         idempotency_key="reminder:complete:demo",
     )
@@ -529,7 +696,7 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
     assert backend.complete_calls == [
         {
             "reminder_id": "reminder-1",
-            "list_ids": ["Personal"],
+            "list_id": "Personal",
             "completion_date": completion_date,
         }
     ]
@@ -538,6 +705,9 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
     assert repeated.is_completed is True
     assert result.completion_date == completion_date
     assert result.status_semantics == "confirmed"
+    assert result.list_id == "Personal"
+    assert result.deduplicated is False
+    assert repeated.deduplicated is True
     with sidecar.connect() as connection:
         item = connection.execute("SELECT * FROM mcp_item").fetchone()
         audit = connection.execute("SELECT * FROM operation_audit").fetchone()
@@ -545,10 +715,51 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
     assert item["item_type"] == "reminder"
     assert item["external_id"] == "reminder-1"
     assert item["status_semantics"] == "confirmed"
+    assert result.stable_id == item["id"]
+    assert repeated.stable_id == item["id"]
     assert audit["id"] == result.audit_id
     assert audit["operation"] == "reminders.complete_reminder"
     assert audit["confirmed_by_user"] == 1
     assert idempotency["key"] == "reminder:complete:demo"
+
+
+def test_complete_reminder_reuses_already_completed_external_state_without_write(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    actual_completion = datetime(2026, 7, 9, 11, tzinfo=UTC)
+    backend = FakeReminderBackend(
+        [
+            ReminderRecord(
+                reminder_id="reminder-1",
+                list_id="Personal",
+                title="MCP todo",
+                notes=None,
+                due_date=date(2026, 7, 9),
+                priority=5,
+                is_completed=True,
+                completion_date=actual_completion,
+            )
+        ]
+    )
+    repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
+
+    result = repository.complete_reminder(
+        target_ref=TargetRef(
+            resource_type="reminder",
+            item_id="reminder-1",
+            container_id="Personal",
+        ),
+        completion_date=actual_completion,
+        expected_state_token=None,
+        confirmed_by_user=True,
+        idempotency_key="reminder:complete:already-completed",
+    )
+
+    assert backend.complete_calls == []
+    assert result.is_completed is True
+    assert result.completion_date == actual_completion
 
 
 def test_complete_reminder_rejects_read_only_target_before_backend(tmp_path: Path) -> None:
@@ -562,9 +773,13 @@ def test_complete_reminder_rejects_read_only_target_before_backend(tmp_path: Pat
         match="Reminder list is not allowed for writes: Work",
     ):
         repository.complete_reminder(
-            reminder_id="reminder-1",
-            list_id="Work",
+            target_ref=TargetRef(
+                resource_type="reminder",
+                item_id="reminder-1",
+                container_id="Work",
+            ),
             completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
+            expected_state_token=None,
             confirmed_by_user=True,
             idempotency_key="reminder:complete:read-only",
         )
@@ -585,10 +800,109 @@ def test_complete_reminder_rejects_naive_completion_date_before_backend(
         match="completion_date must include timezone information",
     ):
         repository.complete_reminder(
-            reminder_id="reminder-1",
+            target_ref=TargetRef(
+                resource_type="reminder",
+                item_id="reminder-1",
+                container_id="Personal",
+            ),
             completion_date=datetime(2026, 7, 9, 12),
+            expected_state_token=None,
             confirmed_by_user=True,
             idempotency_key="reminder:complete:naive",
         )
 
     assert backend.complete_calls == []
+
+
+def test_complete_reminder_rejects_stale_state_token_before_backend_write(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeReminderBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ToolContractError) as changed:
+        repository.complete_reminder(
+            target_ref=TargetRef(
+                resource_type="reminder",
+                item_id="reminder-1",
+                container_id="Personal",
+            ),
+            completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
+            expected_state_token="reminder-state:stale",
+            confirmed_by_user=True,
+            idempotency_key="reminder:complete:stale",
+        )
+
+    assert changed.value.code == "EXTERNAL_STATE_CHANGED"
+    assert len(backend.get_calls) == 1
+    assert backend.complete_calls == []
+
+
+def test_complete_reminder_get_failure_is_retryable_failed_state_not_unknown(
+    tmp_path: Path,
+) -> None:
+    class GetFailureBackend(FakeReminderBackend):
+        def get_reminder(self, **kwargs) -> ReminderRecord:
+            self.get_calls.append(kwargs)
+            raise ReminderBackendError("Reminders unavailable")
+
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = GetFailureBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ReminderBackendError):
+        repository.complete_reminder(
+            target_ref=TargetRef(
+                resource_type="reminder",
+                item_id="reminder-1",
+                container_id="Personal",
+            ),
+            completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
+            expected_state_token=None,
+            confirmed_by_user=True,
+            idempotency_key="reminder:complete:get-failure",
+        )
+
+    assert backend.complete_calls == []
+    with sidecar.connect() as connection:
+        state = connection.execute(
+            """
+            SELECT status, error_code
+            FROM idempotency_key
+            WHERE key = 'reminder:complete:get-failure'
+            """
+        ).fetchone()
+    assert tuple(state) == ("failed", "BACKEND_FAILURE")
+
+
+def test_complete_reminder_marks_wrong_backend_result_unknown(
+    tmp_path: Path,
+) -> None:
+    class UnverifiedCompletionBackend(FakeReminderBackend):
+        def complete_reminder(self, **kwargs) -> ReminderRecord:
+            record = super().complete_reminder(**kwargs)
+            return record.model_copy(update={"is_completed": False})
+
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = UnverifiedCompletionBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ToolContractError) as unknown:
+        repository.complete_reminder(
+            target_ref=TargetRef(
+                resource_type="reminder",
+                item_id="reminder-1",
+                container_id="Personal",
+            ),
+            completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
+            expected_state_token=None,
+            confirmed_by_user=True,
+            idempotency_key="reminder:complete:unverified",
+        )
+
+    assert unknown.value.code == "EXTERNAL_STATE_UNKNOWN"
+    assert len(backend.complete_calls) == 1

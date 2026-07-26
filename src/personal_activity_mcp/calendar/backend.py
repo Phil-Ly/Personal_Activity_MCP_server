@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from personal_activity_mcp.calendar.models import CalendarEventRecord
+from personal_activity_mcp.calendar.models import CalendarEventRecord, DescriptionUpdate
 
 
 class CalendarBackendError(RuntimeError):
@@ -89,31 +89,35 @@ class MacOSCalendarBackend:
         *,
         event_id: str,
         calendar_id: str,
-        title: str | None,
-        start: datetime | None,
-        end: datetime | None,
-        is_all_day: bool | None,
-        notes: str | None,
-        location: str | None,
-        timezone: str,
+        description: DescriptionUpdate,
     ) -> CalendarEventRecord:
         payload = self._run_jxa(
             _UPDATE_EVENT_JXA,
             [
                 calendar_id,
                 event_id,
-                title or "",
-                start.isoformat() if start is not None else "",
-                end.isoformat() if end is not None else "",
-                "" if is_all_day is None else ("true" if is_all_day else "false"),
-                notes or "",
-                location or "",
-                timezone,
+                description.operation,
+                description.value or "",
             ],
         )
         row = json.loads(payload)
         if not isinstance(row, dict):
             raise CalendarBackendError("Calendar update_event returned a non-object payload")
+        return _record_from_payload(row)
+
+    def get_event(
+        self,
+        *,
+        event_id: str,
+        calendar_id: str,
+    ) -> CalendarEventRecord:
+        payload = self._run_jxa(
+            _GET_EVENT_JXA,
+            [calendar_id, event_id],
+        )
+        row = json.loads(payload)
+        if not isinstance(row, dict):
+            raise CalendarBackendError("Calendar get_event returned a non-object payload")
         return _record_from_payload(row)
 
     def _run_jxa(self, script: str, args: list[str]) -> str:
@@ -235,12 +239,8 @@ _UPDATE_EVENT_JXA = r"""
 function run(argv) {
   const calendarId = argv[0];
   const eventId = argv[1];
-  const title = argv[2] || null;
-  const start = argv[3] ? new Date(argv[3]) : null;
-  const end = argv[4] ? new Date(argv[4]) : null;
-  const allDayRaw = argv[5];
-  const notes = argv[6] || null;
-  const location = argv[7] || null;
+  const operation = argv[2];
+  const description = argv[3];
   const Calendar = Application("Calendar");
   const calendar = Calendar.calendars.byName(calendarId);
   const matches = calendar.events.whose({uid: eventId})();
@@ -248,24 +248,38 @@ function run(argv) {
     throw new Error("Calendar event not found: " + eventId);
   }
   const event = matches[0];
-  if (title !== null) {
-    event.summary = title;
+  if (operation === "set") {
+    event.description = description;
+  } else if (operation === "clear") {
+    event.description = "";
+  } else {
+    throw new Error("Unsupported description operation");
   }
-  if (start !== null) {
-    event.startDate = start;
+  return JSON.stringify({
+    event_id: event.uid(),
+    calendar_id: calendarId,
+    title: event.summary(),
+    start: event.startDate().toISOString(),
+    end: event.endDate().toISOString(),
+    is_all_day: event.alldayEvent(),
+    location: event.location(),
+    notes: event.description()
+  });
+}
+"""
+
+
+_GET_EVENT_JXA = r"""
+function run(argv) {
+  const calendarId = argv[0];
+  const eventId = argv[1];
+  const Calendar = Application("Calendar");
+  const calendar = Calendar.calendars.byName(calendarId);
+  const matches = calendar.events.whose({uid: eventId})();
+  if (matches.length === 0) {
+    throw new Error("Calendar event not found: " + eventId);
   }
-  if (end !== null) {
-    event.endDate = end;
-  }
-  if (allDayRaw !== "") {
-    event.alldayEvent = allDayRaw === "true";
-  }
-  if (notes !== null) {
-    event.description = notes;
-  }
-  if (location !== null) {
-    event.location = location;
-  }
+  const event = matches[0];
   return JSON.stringify({
     event_id: event.uid(),
     calendar_id: calendarId,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from personal_activity_mcp.calendar.models import (
@@ -15,6 +15,7 @@ from personal_activity_mcp.calendar.models import (
     CalendarEventRecord,
     CalendarListResult,
     CalendarUpdateResult,
+    DescriptionUpdate,
     TimedEventRange,
 )
 from personal_activity_mcp.common import (
@@ -69,13 +70,14 @@ class CalendarBackend(Protocol):
         *,
         event_id: str,
         calendar_id: str,
-        title: str | None,
-        start: datetime | None,
-        end: datetime | None,
-        is_all_day: bool | None,
-        notes: str | None,
-        location: str | None,
-        timezone: str,
+        description: DescriptionUpdate,
+    ) -> CalendarEventRecord: ...
+
+    def get_event(
+        self,
+        *,
+        event_id: str,
+        calendar_id: str,
     ) -> CalendarEventRecord: ...
 
 
@@ -204,6 +206,12 @@ class CalendarRepository:
             operation="calendar.create_event",
             request_hash=request_hash,
         )
+        write_control.audit_non_executable_reservation(
+            decision,
+            operation="calendar.create_event",
+            request_hash=request_hash,
+            confirmed_by_user=False,
+        )
         _raise_for_non_executable_reservation(decision)
         if decision.status == "deduplicated":
             item = self._sidecar.get_mcp_item(decision.result_item_id or "")
@@ -215,7 +223,7 @@ class CalendarRepository:
                 stable_id=str(item["id"]),
                 created=False,
                 deduplicated=True,
-                status_semantics="planned",
+                status_semantics=_sidecar_status_semantics(item),
                 source_refs=normalized_source_refs,
             )
 
@@ -236,9 +244,26 @@ class CalendarRepository:
                 idempotency_key=idempotency_key,
                 operation="calendar.create_event",
                 request_hash=request_hash,
-                confirmed_by_user=True,
+                confirmed_by_user=False,
                 error=error,
             )
+        if not _created_event_matches_request(
+            record,
+            calendar_id=calendar_id,
+            start=start,
+            end=end,
+            is_all_day=is_all_day,
+        ):
+            _finalize_unverified_result(
+                write_control,
+                idempotency_key=idempotency_key,
+                operation="calendar.create_event",
+                request_hash=request_hash,
+                confirmed_by_user=False,
+            )
+        now = self._clock.now()
+        require_aware_datetime(now, "clock.now()")
+        status_semantics = _status_semantics(record, now=now)
         stable_id = _stable_calendar_item_id(idempotency_key)
         try:
             write_control.finalize_success(
@@ -252,7 +277,7 @@ class CalendarRepository:
                     title_hash=_request_hash({"title": title}),
                     time_start=start.isoformat(),
                     time_end=end.isoformat(),
-                    status_semantics="planned",
+                    status_semantics=status_semantics,
                     state_token=_calendar_state_token(record),
                     created_by_mcp=True,
                     source_relation_type="created_from",
@@ -262,7 +287,7 @@ class CalendarRepository:
                     request_hash=request_hash,
                     result_status="succeeded",
                     error_code=None,
-                    confirmed_by_user=True,
+                    confirmed_by_user=False,
                 ),
             )
         except Exception as error:
@@ -273,7 +298,7 @@ class CalendarRepository:
             stable_id=stable_id,
             created=True,
             deduplicated=False,
-            status_semantics="planned",
+            status_semantics=status_semantics,
             source_refs=normalized_source_refs,
         )
 
@@ -285,20 +310,19 @@ class CalendarRepository:
     def update_event(
         self,
         *,
-        calendar_id: str,
-        event_id: str,
-        title: str | None,
-        start: datetime | None,
-        end: datetime | None,
-        is_all_day: bool | None,
-        notes: str | None,
-        location: str | None,
-        timezone: str,
+        target_ref: TargetRef,
+        description: DescriptionUpdate | None,
+        completion_status: Literal["unknown", "incomplete", "completed"] | None,
+        expected_state_token: str | None,
         source_refs: list[str],
         confirmed_by_user: bool,
         idempotency_key: str,
     ) -> CalendarUpdateResult:
         """Update a Calendar event with allowlist, safety, idempotency, and audit controls."""
+        if target_ref.resource_type != "calendar_event" or target_ref.container_id is None:
+            raise ValueError("target_ref must identify one calendar_event and Calendar")
+        calendar_id = target_ref.container_id
+        event_id = target_ref.item_id
         source = self._calendar_sources.get(calendar_id)
         if source is None:
             raise ValueError(f"Unknown calendar_ids: {calendar_id}")
@@ -308,30 +332,29 @@ class CalendarRepository:
             raise ValueError("sidecar is required for calendar.update_event")
         if not event_id.strip():
             raise ValueError("event_id must be a non-empty string")
-        if title is not None and not title.strip():
-            raise ValueError("title must be a non-empty string when provided")
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must be a non-empty string")
-        _validate_timezone(timezone)
-        if start is not None:
-            require_aware_datetime(start, "start")
-        if end is not None:
-            require_aware_datetime(end, "end")
-        if start is not None and end is not None and start >= end:
-            raise ValueError("start must be before end")
+        if description is None and completion_status is None:
+            raise ValueError("At least one update field is required")
 
+        normalized_source_refs = normalize_source_refs(source_refs)
+        request_hash = _request_hash(
+            {
+                "target_ref": target_ref.model_dump(mode="json"),
+                "description": description.model_dump(mode="json")
+                if description is not None
+                else None,
+                "completion_status": completion_status,
+                "expected_state_token": expected_state_token,
+                "source_refs": normalized_source_refs,
+                "confirmed_by_user": confirmed_by_user,
+            }
+        )
         sidecar_item = self._sidecar_item_for_calendar_event(
             external_id=event_id,
             external_container_id=calendar_id,
         )
-        if _is_confirmed_action_record(sidecar_item) and not confirmed_by_user:
-            request_hash = _request_hash(
-                {
-                    "calendar_id": calendar_id,
-                    "event_id": event_id,
-                    "operation": "calendar.update_event",
-                }
-            )
+        if completion_status is not None and not confirmed_by_user:
             self._sidecar.record_operation_audit(
                 operation="calendar.update_event",
                 target_item_id=str(sidecar_item["id"]) if sidecar_item is not None else None,
@@ -342,38 +365,25 @@ class CalendarRepository:
             )
             raise ValueError("USER_CONFIRMATION_REQUIRED")
 
-        updated_fields = _updated_fields(
-            title=title,
-            start=start,
-            end=end,
-            is_all_day=is_all_day,
-            notes=notes,
-            location=location,
-        )
-        if not updated_fields:
-            raise ValueError("At least one update field is required")
-
-        normalized_source_refs = normalize_source_refs(source_refs)
-        request_hash = _request_hash(
-            {
-                "calendar_id": calendar_id,
-                "event_id": event_id,
-                "title": title,
-                "start": start.isoformat() if start is not None else None,
-                "end": end.isoformat() if end is not None else None,
-                "is_all_day": is_all_day,
-                "notes": notes,
-                "location": location,
-                "timezone": timezone,
-                "source_refs": normalized_source_refs,
-                "confirmed_by_user": confirmed_by_user,
-            }
-        )
+        updated_fields = [
+            field
+            for field, value in (
+                ("description", description),
+                ("completion_status", completion_status),
+            )
+            if value is not None
+        ]
         write_control = self._require_write_control()
         decision = write_control.reserve_operation(
             idempotency_key=idempotency_key,
             operation="calendar.update_event",
             request_hash=request_hash,
+        )
+        write_control.audit_non_executable_reservation(
+            decision,
+            operation="calendar.update_event",
+            request_hash=request_hash,
+            confirmed_by_user=confirmed_by_user,
         )
         _raise_for_non_executable_reservation(decision)
         if decision.status == "deduplicated":
@@ -387,26 +397,19 @@ class CalendarRepository:
                 updated=False,
                 deduplicated=True,
                 updated_fields=updated_fields,
-                requires_user_confirmation=False,
                 status_semantics=_sidecar_status_semantics(item),
+                completion_status=self._calendar_completion_status(str(item["id"])),
                 source_refs=normalized_source_refs,
                 audit_id=None,
             )
 
         try:
-            record = self._backend.update_event(
+            current = self._backend.get_event(
                 event_id=event_id,
                 calendar_id=calendar_id,
-                title=title,
-                start=start,
-                end=end,
-                is_all_day=is_all_day,
-                notes=notes,
-                location=location,
-                timezone=timezone,
             )
         except Exception as error:
-            _finalize_backend_failure(
+            _finalize_preflight_backend_failure(
                 write_control,
                 idempotency_key=idempotency_key,
                 operation="calendar.update_event",
@@ -414,14 +417,78 @@ class CalendarRepository:
                 confirmed_by_user=confirmed_by_user,
                 error=error,
             )
+        if current.event_id != event_id or current.calendar_id != calendar_id:
+            _finalize_external_state_changed(
+                write_control,
+                idempotency_key=idempotency_key,
+                operation="calendar.update_event",
+                request_hash=request_hash,
+                confirmed_by_user=confirmed_by_user,
+            )
+        if (
+            expected_state_token is not None
+            and _calendar_state_token(current) != expected_state_token
+        ):
+            _finalize_external_state_changed(
+                write_control,
+                idempotency_key=idempotency_key,
+                operation="calendar.update_event",
+                request_hash=request_hash,
+                confirmed_by_user=confirmed_by_user,
+            )
+
+        record = current
+        if description is not None:
+            try:
+                self._backend.update_event(
+                    event_id=event_id,
+                    calendar_id=calendar_id,
+                    description=description,
+                )
+            except Exception as error:
+                _finalize_backend_failure(
+                    write_control,
+                    idempotency_key=idempotency_key,
+                    operation="calendar.update_event",
+                    request_hash=request_hash,
+                    confirmed_by_user=confirmed_by_user,
+                    error=error,
+                )
+            try:
+                record = self._backend.get_event(
+                    event_id=event_id,
+                    calendar_id=calendar_id,
+                )
+            except Exception:
+                _finalize_unverified_result(
+                    write_control,
+                    idempotency_key=idempotency_key,
+                    operation="calendar.update_event",
+                    request_hash=request_hash,
+                    confirmed_by_user=confirmed_by_user,
+                )
+            expected_notes = description.value if description.operation == "set" else None
+            if (
+                record.event_id != event_id
+                or record.calendar_id != calendar_id
+                or record.notes != expected_notes
+            ):
+                _finalize_unverified_result(
+                    write_control,
+                    idempotency_key=idempotency_key,
+                    operation="calendar.update_event",
+                    request_hash=request_hash,
+                    confirmed_by_user=confirmed_by_user,
+                )
+
         stable_id = (
             str(sidecar_item["id"])
             if sidecar_item is not None
             else _stable_calendar_item_id(f"{calendar_id}:{event_id}")
         )
-        status_semantics = (
-            _sidecar_status_semantics(sidecar_item) if sidecar_item is not None else "planned"
-        )
+        now = self._clock.now()
+        require_aware_datetime(now, "clock.now()")
+        status_semantics = _status_semantics(record, now=now)
         audit = AuditWrite(
             request_hash=request_hash,
             result_status="succeeded",
@@ -446,6 +513,7 @@ class CalendarRepository:
                     state_token=_calendar_state_token(record),
                     created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
                     source_relation_type="updated_from",
+                    calendar_completion_status=completion_status,
                 ),
                 source_refs=normalized_source_refs,
                 audit=audit,
@@ -459,8 +527,10 @@ class CalendarRepository:
             updated=True,
             deduplicated=False,
             updated_fields=updated_fields,
-            requires_user_confirmation=False,
             status_semantics=status_semantics,
+            completion_status=completion_status
+            if completion_status is not None
+            else self._calendar_completion_status(stable_id),
             source_refs=normalized_source_refs,
             audit_id=audit.audit_id,
         )
@@ -551,6 +621,25 @@ class CalendarRepository:
             external_container_id=external_container_id,
         )
 
+    def _calendar_completion_status(
+        self,
+        item_id: str,
+    ) -> Literal["unknown", "incomplete", "completed"]:
+        if self._sidecar is None:
+            return "unknown"
+        with self._sidecar.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT completion_status
+                FROM calendar_event_state
+                WHERE item_id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+        if row is None:
+            return "unknown"
+        return str(row["completion_status"])  # type: ignore[return-value]
+
 
 def _calendar_evidence_id(calendar_id: str, event_id: str) -> str:
     digest = hashlib.sha256(f"{calendar_id}:{event_id}".encode()).hexdigest()
@@ -606,6 +695,23 @@ def _calendar_state_token(record: CalendarEventRecord) -> str:
     return f"calendar-state:{_request_hash(payload)}"
 
 
+def _created_event_matches_request(
+    record: CalendarEventRecord,
+    *,
+    calendar_id: str,
+    start: datetime,
+    end: datetime,
+    is_all_day: bool,
+) -> bool:
+    return (
+        bool(record.event_id.strip())
+        and record.calendar_id == calendar_id
+        and record.start == start
+        and record.end == end
+        and record.is_all_day is is_all_day
+    )
+
+
 def _calendar_page_key(event: CalendarEventEvidence) -> tuple[str, ...]:
     return (
         event.start.astimezone(UTC).isoformat(),
@@ -620,40 +726,6 @@ def _sidecar_status_semantics(sidecar_item: dict[str, object]) -> str:
     if status in {"planned", "probable", "confirmed"}:
         return str(status)
     return "planned"
-
-
-def _is_confirmed_action_record(sidecar_item: dict[str, object] | None) -> bool:
-    if sidecar_item is None:
-        return False
-    return (
-        sidecar_item.get("item_type") == "action_record"
-        and sidecar_item.get("status_semantics") == "confirmed"
-    )
-
-
-def _updated_fields(
-    *,
-    title: str | None,
-    start: datetime | None,
-    end: datetime | None,
-    is_all_day: bool | None,
-    notes: str | None,
-    location: str | None,
-) -> list[str]:
-    fields: list[str] = []
-    if title is not None:
-        fields.append("title")
-    if start is not None:
-        fields.append("start")
-    if end is not None:
-        fields.append("end")
-    if is_all_day is not None:
-        fields.append("is_all_day")
-    if notes is not None:
-        fields.append("notes")
-    if location is not None:
-        fields.append("location")
-    return fields
 
 
 def _stable_calendar_item_id(idempotency_key: str) -> str:
@@ -725,6 +797,81 @@ def _finalize_backend_failure(
         ),
     )
     raise _external_state_unknown_error() from error
+
+
+def _finalize_preflight_backend_failure(
+    write_control: WriteControl,
+    *,
+    idempotency_key: str,
+    operation: str,
+    request_hash: str,
+    confirmed_by_user: bool,
+    error: Exception,
+) -> None:
+    write_control.finalize_failure(
+        idempotency_key=idempotency_key,
+        operation=operation,
+        status="failed",
+        error_code="BACKEND_FAILURE",
+        audit=AuditWrite(
+            request_hash=request_hash,
+            result_status="failed",
+            error_code="BACKEND_FAILURE",
+            confirmed_by_user=confirmed_by_user,
+        ),
+    )
+    raise error
+
+
+def _finalize_unverified_result(
+    write_control: WriteControl,
+    *,
+    idempotency_key: str,
+    operation: str,
+    request_hash: str,
+    confirmed_by_user: bool,
+) -> None:
+    write_control.finalize_failure(
+        idempotency_key=idempotency_key,
+        operation=operation,
+        status="external_state_unknown",
+        error_code="EXTERNAL_STATE_UNKNOWN",
+        audit=AuditWrite(
+            request_hash=request_hash,
+            result_status="external_state_unknown",
+            error_code="EXTERNAL_STATE_UNKNOWN",
+            confirmed_by_user=confirmed_by_user,
+        ),
+    )
+    raise _external_state_unknown_error()
+
+
+def _finalize_external_state_changed(
+    write_control: WriteControl,
+    *,
+    idempotency_key: str,
+    operation: str,
+    request_hash: str,
+    confirmed_by_user: bool,
+) -> None:
+    write_control.finalize_failure(
+        idempotency_key=idempotency_key,
+        operation=operation,
+        status="failed",
+        error_code="EXTERNAL_STATE_CHANGED",
+        audit=AuditWrite(
+            request_hash=request_hash,
+            result_status="failed",
+            error_code="EXTERNAL_STATE_CHANGED",
+            confirmed_by_user=confirmed_by_user,
+        ),
+    )
+    raise ToolContractError(
+        code="EXTERNAL_STATE_CHANGED",
+        message="The Calendar event changed after it was read",
+        retryable=False,
+        public_message="The Calendar event changed after it was read",
+    )
 
 
 def _external_state_unknown_error() -> ToolContractError:

@@ -36,6 +36,7 @@ class McpItemWrite(BaseModel):
     state_token: str | None = None
     created_by_mcp: bool
     source_relation_type: Literal["created_from", "supported_by", "updated_from"]
+    calendar_completion_status: Literal["unknown", "incomplete", "completed"] | None = None
 
 
 class AuditWrite(BaseModel):
@@ -145,6 +146,30 @@ class WriteControl:
                 return ReservationDecision(status="execute")
             raise sqlite3.DatabaseError(f"Unsupported idempotency status: {status}")
 
+    def audit_non_executable_reservation(
+        self,
+        decision: ReservationDecision,
+        *,
+        operation: str,
+        request_hash: str,
+        confirmed_by_user: bool,
+    ) -> None:
+        """Record a rejected conflicting or concurrent request without changing its owner."""
+        error_code = {
+            "conflict": "IDEMPOTENCY_CONFLICT",
+            "in_progress": "OPERATION_IN_PROGRESS",
+        }.get(decision.status)
+        if error_code is None:
+            return
+        self._repository.record_operation_audit(
+            operation=operation,
+            target_item_id=decision.result_item_id,
+            request_hash=request_hash,
+            result_status="blocked",
+            error_code=error_code,
+            confirmed_by_user=confirmed_by_user,
+        )
+
     def finalize_success(
         self,
         *,
@@ -204,6 +229,21 @@ class WriteControl:
                         1 if item.created_by_mcp else 0,
                     ),
                 )
+                if item.calendar_completion_status is not None:
+                    if item.item_type != "calendar_event":
+                        raise ValueError(
+                            "calendar_completion_status requires a calendar_event item"
+                        )
+                    connection.execute(
+                        """
+                        INSERT INTO calendar_event_state (item_id, completion_status)
+                        VALUES (?, ?)
+                        ON CONFLICT(item_id) DO UPDATE SET
+                            completion_status = excluded.completion_status,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (item.item_id, item.calendar_completion_status),
+                    )
                 for source_ref in normalized_refs:
                     connection.execute(
                         """

@@ -1,6 +1,7 @@
 """Register Calendar MCP Tools."""
 
 from datetime import datetime
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -9,8 +10,9 @@ from personal_activity_mcp.calendar import (
     CalendarListResult,
     CalendarRepository,
     CalendarUpdateResult,
+    DescriptionUpdate,
 )
-from personal_activity_mcp.common import ToolOutcome, call_safely
+from personal_activity_mcp.common import TargetRef, ToolOutcome, call_safely
 
 
 def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> None:
@@ -80,30 +82,20 @@ def register_calendar_tools(server: FastMCP, repository: CalendarRepository) -> 
         structured_output=True,
     )
     def update_calendar_event(
-        calendar_id: str,
-        event_id: str,
-        title: str | None,
-        start: datetime | None,
-        end: datetime | None,
-        is_all_day: bool | None,
-        notes: str | None,
-        location: str | None,
-        timezone: str,
+        target_ref: TargetRef,
+        description: DescriptionUpdate | None,
+        completion_status: Literal["unknown", "incomplete", "completed"] | None,
+        expected_state_token: str | None,
         source_refs: list[str],
         confirmed_by_user: bool,
         idempotency_key: str,
     ) -> ToolOutcome[CalendarUpdateResult]:
         return call_safely(
             lambda: repository.update_event(
-                calendar_id=calendar_id,
-                event_id=event_id,
-                title=title,
-                start=start,
-                end=end,
-                is_all_day=is_all_day,
-                notes=notes,
-                location=location,
-                timezone=timezone,
+                target_ref=target_ref,
+                description=description,
+                completion_status=completion_status,
+                expected_state_token=expected_state_token,
                 source_refs=source_refs,
                 confirmed_by_user=confirmed_by_user,
                 idempotency_key=idempotency_key,

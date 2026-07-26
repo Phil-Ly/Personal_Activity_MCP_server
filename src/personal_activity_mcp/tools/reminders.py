@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 from mcp.server.fastmcp import FastMCP
 
-from personal_activity_mcp.common import ToolOutcome, call_safely
+from personal_activity_mcp.common import TargetRef, ToolOutcome, call_safely
 from personal_activity_mcp.reminders import (
     ReminderCompleteResult,
     ReminderCreateResult,
@@ -78,18 +78,18 @@ def register_reminder_tools(server: FastMCP, repository: ReminderRepository) -> 
         structured_output=True,
     )
     def complete_reminder(
-        reminder_id: str,
+        target_ref: TargetRef,
         completion_date: datetime,
+        expected_state_token: str | None,
         confirmed_by_user: bool,
         idempotency_key: str,
-        list_id: str | None = None,
     ) -> ToolOutcome[ReminderCompleteResult]:
         return call_safely(
             lambda: repository.complete_reminder(
-                reminder_id=reminder_id,
+                target_ref=target_ref,
                 completion_date=completion_date,
+                expected_state_token=expected_state_token,
                 confirmed_by_user=confirmed_by_user,
                 idempotency_key=idempotency_key,
-                list_id=list_id,
             )
         )

@@ -7,8 +7,9 @@ from personal_activity_mcp.calendar import (
     CalendarBackendError,
     CalendarEventRecord,
     CalendarRepository,
+    DescriptionUpdate,
 )
-from personal_activity_mcp.common import ToolContractError
+from personal_activity_mcp.common import TargetRef, ToolContractError
 from personal_activity_mcp.config import AppConfig, CalendarSource
 from personal_activity_mcp.sidecar import SidecarRepository
 
@@ -26,6 +27,7 @@ class FakeCalendarBackend:
         self.events = events or []
         self.list_calls: list[dict[str, object]] = []
         self.create_calls: list[dict[str, object]] = []
+        self.get_calls: list[dict[str, str]] = []
         self.update_calls: list[dict[str, object]] = []
         self.next_created_event_id = "created-event-1"
 
@@ -73,7 +75,7 @@ class FakeCalendarBackend:
                 "timezone": timezone,
             }
         )
-        return CalendarEventRecord(
+        record = CalendarEventRecord(
             event_id=self.next_created_event_id,
             calendar_id=calendar_id,
             title=title,
@@ -83,31 +85,50 @@ class FakeCalendarBackend:
             location=location,
             notes=notes,
         )
+        self.events.append(record)
+        return record
+
+    def get_event(
+        self,
+        *,
+        event_id: str,
+        calendar_id: str,
+    ) -> CalendarEventRecord:
+        self.get_calls.append(
+            {
+                "event_id": event_id,
+                "calendar_id": calendar_id,
+            }
+        )
+        existing = next(
+            (
+                event
+                for event in self.events
+                if event.event_id == event_id and event.calendar_id == calendar_id
+            ),
+            None,
+        )
+        return existing or CalendarEventRecord(
+            event_id=event_id,
+            calendar_id=calendar_id,
+            title="Existing event",
+            start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+            end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+            is_all_day=False,
+        )
 
     def update_event(
         self,
         *,
         event_id: str,
         calendar_id: str,
-        title: str | None,
-        start: datetime | None,
-        end: datetime | None,
-        is_all_day: bool | None,
-        notes: str | None,
-        location: str | None,
-        timezone: str,
+        description: DescriptionUpdate,
     ) -> CalendarEventRecord:
         self.update_calls.append(
             {
                 "event_id": event_id,
                 "calendar_id": calendar_id,
-                "title": title,
-                "start": start,
-                "end": end,
-                "is_all_day": is_all_day,
-                "notes": notes,
-                "location": location,
-                "timezone": timezone,
+                "description": description.model_dump(),
             }
         )
         existing = next(
@@ -122,19 +143,30 @@ class FakeCalendarBackend:
             event_id=event_id,
             calendar_id=calendar_id,
             title="Existing event",
-            start=start or datetime(2026, 7, 8, 10, tzinfo=UTC),
-            end=end or datetime(2026, 7, 8, 11, tzinfo=UTC),
+            start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+            end=datetime(2026, 7, 8, 11, tzinfo=UTC),
             is_all_day=False,
         )
+        updated = base.model_copy(
+            update={
+                "notes": description.value if description.operation == "set" else None,
+            }
+        )
+        self.events = [
+            updated if event.event_id == event_id and event.calendar_id == calendar_id else event
+            for event in self.events
+        ]
+        if existing is None:
+            self.events.append(updated)
         return CalendarEventRecord(
             event_id=event_id,
             calendar_id=calendar_id,
-            title=title if title is not None else base.title,
-            start=start if start is not None else base.start,
-            end=end if end is not None else base.end,
-            is_all_day=is_all_day if is_all_day is not None else base.is_all_day,
-            location=location if location is not None else base.location,
-            notes=notes if notes is not None else base.notes,
+            title=updated.title,
+            start=updated.start,
+            end=updated.end,
+            is_all_day=updated.is_all_day,
+            location=updated.location,
+            notes=updated.notes,
         )
 
 
@@ -583,6 +615,97 @@ def test_create_event_writes_calendar_once_and_records_sidecar_metadata(
     assert audit["operation"] == "calendar.create_event"
     assert audit["target_item_id"] == created.stable_id
     assert audit["result_status"] == "succeeded"
+    assert audit["confirmed_by_user"] == 0
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "now", "expected_status"),
+    [
+        (
+            datetime(2026, 7, 7, 10, tzinfo=UTC),
+            datetime(2026, 7, 7, 11, tzinfo=UTC),
+            datetime(2026, 7, 8, 9, tzinfo=UTC),
+            "probable",
+        ),
+        (
+            datetime(2026, 7, 9, 10, tzinfo=UTC),
+            datetime(2026, 7, 9, 11, tzinfo=UTC),
+            datetime(2026, 7, 8, 9, tzinfo=UTC),
+            "planned",
+        ),
+    ],
+)
+def test_create_event_reports_time_semantics_for_past_and_future_events(
+    tmp_path: Path,
+    start: datetime,
+    end: datetime,
+    now: datetime,
+    expected_status: str,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    repository = CalendarRepository(
+        make_config(tmp_path),
+        FakeCalendarBackend(),
+        sidecar,
+        clock=FixedClock(now),
+    )
+
+    result = repository.create_event(
+        calendar_id="Personal",
+        title="MCP demo",
+        start=start,
+        end=end,
+        is_all_day=False,
+        notes=None,
+        location=None,
+        timezone="Asia/Shanghai",
+        source_refs=[],
+        idempotency_key=f"calendar:create:{expected_status}",
+    )
+
+    assert result.status_semantics == expected_status
+
+
+def test_create_event_marks_unverifiable_backend_result_unknown(
+    tmp_path: Path,
+) -> None:
+    class WrongCalendarBackend(FakeCalendarBackend):
+        def create_event(self, **kwargs) -> CalendarEventRecord:
+            record = super().create_event(**kwargs)
+            return record.model_copy(update={"calendar_id": "Work"})
+
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = WrongCalendarBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ToolContractError) as unknown:
+        repository.create_event(
+            calendar_id="Personal",
+            title="MCP demo",
+            start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+            end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+            is_all_day=False,
+            notes=None,
+            location=None,
+            timezone="Asia/Shanghai",
+            source_refs=[],
+            idempotency_key="calendar:create:wrong-result",
+        )
+
+    assert unknown.value.code == "EXTERNAL_STATE_UNKNOWN"
+    assert len(backend.create_calls) == 1
+    with sidecar.connect() as connection:
+        state = connection.execute(
+            """
+            SELECT status, error_code
+            FROM idempotency_key
+            WHERE key = ? AND operation = ?
+            """,
+            ("calendar:create:wrong-result", "calendar.create_event"),
+        ).fetchone()
+    assert tuple(state) == ("external_state_unknown", "EXTERNAL_STATE_UNKNOWN")
 
 
 def test_create_event_does_not_retry_after_uncertain_backend_result(
@@ -763,50 +886,73 @@ def test_create_event_rejects_idempotency_conflict(tmp_path: Path) -> None:
             source_refs=[],
             idempotency_key="calendar:create:demo",
         )
+    with sidecar.connect() as connection:
+        blocked = connection.execute(
+            """
+            SELECT result_status, error_code
+            FROM operation_audit
+            WHERE operation = 'calendar.create_event'
+              AND result_status = 'blocked'
+            """
+        ).fetchone()
+    assert tuple(blocked) == ("blocked", "IDEMPOTENCY_CONFLICT")
 
 
 def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -> None:
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
     sidecar.initialize()
-    backend = FakeCalendarBackend()
+    event = CalendarEventRecord(
+        event_id="event-1",
+        calendar_id="Personal",
+        title="Existing event",
+        start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+        is_all_day=False,
+        notes="Old notes",
+    )
+    backend = FakeCalendarBackend([event])
     repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
-    start = datetime(2026, 7, 8, 12, tzinfo=UTC)
-    end = datetime(2026, 7, 8, 13, tzinfo=UTC)
+    evidence = repository.list_events(
+        calendar_ids=["Personal"],
+        start=datetime(2026, 7, 8, 9, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 12, tzinfo=UTC),
+        include_notes=True,
+    ).events[0]
 
     updated = repository.update_event(
-        calendar_id="Personal",
-        event_id="event-1",
-        title="Updated MCP demo",
-        start=start,
-        end=end,
-        is_all_day=False,
-        notes="Updated notes",
-        location="Room 2",
-        timezone="Asia/Shanghai",
+        target_ref=TargetRef(
+            resource_type="calendar_event",
+            item_id="event-1",
+            container_id="Personal",
+        ),
+        description=DescriptionUpdate(operation="set", value="Updated notes"),
+        completion_status="completed",
+        expected_state_token=evidence.state_token,
         source_refs=[" file:b ", "file:a", "file:b"],
-        confirmed_by_user=False,
+        confirmed_by_user=True,
         idempotency_key="calendar:update:demo",
     )
     repeated = repository.update_event(
-        calendar_id="Personal",
-        event_id="event-1",
-        title="Updated MCP demo",
-        start=start,
-        end=end,
-        is_all_day=False,
-        notes="Updated notes",
-        location="Room 2",
-        timezone="Asia/Shanghai",
+        target_ref=TargetRef(
+            resource_type="calendar_event",
+            item_id="event-1",
+            container_id="Personal",
+        ),
+        description=DescriptionUpdate(operation="set", value="Updated notes"),
+        completion_status="completed",
+        expected_state_token=evidence.state_token,
         source_refs=["file:a", "file:b"],
-        confirmed_by_user=False,
+        confirmed_by_user=True,
         idempotency_key="calendar:update:demo",
     )
 
     assert len(backend.update_calls) == 1
+    assert len(backend.get_calls) == 2
     assert updated.updated is True
     assert updated.deduplicated is False
     assert updated.event_id == "event-1"
-    assert updated.updated_fields == ["title", "start", "end", "is_all_day", "notes", "location"]
+    assert updated.updated_fields == ["description", "completion_status"]
+    assert updated.completion_status == "completed"
     assert updated.audit_id.startswith("audit:")
     assert repeated.updated is False
     assert repeated.deduplicated is True
@@ -820,66 +966,232 @@ def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -
         audit = connection.execute(
             "SELECT * FROM operation_audit WHERE operation = 'calendar.update_event'"
         ).fetchone()
+        completion = connection.execute(
+            "SELECT completion_status FROM calendar_event_state WHERE item_id = ?",
+            (updated.stable_id,),
+        ).fetchone()
     assert item["item_type"] == "calendar_event"
     assert item["external_id"] == "event-1"
-    assert item["status_semantics"] == "planned"
+    assert item["status_semantics"] == "probable"
     assert audit["target_item_id"] == updated.stable_id
-    assert audit["confirmed_by_user"] == 0
+    assert audit["confirmed_by_user"] == 1
+    assert completion["completion_status"] == "completed"
 
 
-def test_update_event_rejects_naive_datetime_before_backend(tmp_path: Path) -> None:
+def test_update_event_can_clear_description_without_completion_confirmation(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeCalendarBackend(
+        [
+            CalendarEventRecord(
+                event_id="event-1",
+                calendar_id="Personal",
+                title="Existing event",
+                start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+                end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+                is_all_day=False,
+                notes="Remove me",
+            )
+        ]
+    )
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+
+    result = repository.update_event(
+        target_ref=TargetRef(
+            resource_type="calendar_event",
+            item_id="event-1",
+            container_id="Personal",
+        ),
+        description=DescriptionUpdate(operation="clear"),
+        completion_status=None,
+        expected_state_token=None,
+        source_refs=[],
+        confirmed_by_user=False,
+        idempotency_key="calendar:update:clear",
+    )
+
+    assert result.updated_fields == ["description"]
+    assert backend.events[0].notes is None
+    assert backend.update_calls == [
+        {
+            "event_id": "event-1",
+            "calendar_id": "Personal",
+            "description": {"operation": "clear", "value": None},
+        }
+    ]
+
+
+def test_update_event_completion_only_requires_confirmation_and_writes_no_backend(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeCalendarBackend(
+        [
+            CalendarEventRecord(
+                event_id="event-1",
+                calendar_id="Personal",
+                title="Existing event",
+                start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+                end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+                is_all_day=False,
+            )
+        ]
+    )
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ValueError, match="USER_CONFIRMATION_REQUIRED"):
+        repository.update_event(
+            target_ref=TargetRef(
+                resource_type="calendar_event",
+                item_id="event-1",
+                container_id="Personal",
+            ),
+            description=None,
+            completion_status="completed",
+            expected_state_token=None,
+            source_refs=[],
+            confirmed_by_user=False,
+            idempotency_key="calendar:update:unconfirmed",
+        )
+
+    result = repository.update_event(
+        target_ref=TargetRef(
+            resource_type="calendar_event",
+            item_id="event-1",
+            container_id="Personal",
+        ),
+        description=None,
+        completion_status="completed",
+        expected_state_token=None,
+        source_refs=[],
+        confirmed_by_user=True,
+        idempotency_key="calendar:update:completion-only",
+    )
+
+    assert result.completion_status == "completed"
+    assert backend.update_calls == []
+    with sidecar.connect() as connection:
+        blocked = connection.execute(
+            """
+            SELECT error_code
+            FROM operation_audit
+            WHERE operation = 'calendar.update_event'
+              AND result_status = 'blocked'
+            """
+        ).fetchone()
+    assert blocked["error_code"] == "USER_CONFIRMATION_REQUIRED"
+
+
+def test_update_event_rejects_stale_state_token_before_backend_write(
+    tmp_path: Path,
+) -> None:
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
     sidecar.initialize()
     backend = FakeCalendarBackend()
     repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
 
-    with pytest.raises(ValueError, match="start must include timezone information"):
+    with pytest.raises(ToolContractError) as changed:
         repository.update_event(
-            calendar_id="Personal",
-            event_id="event-1",
-            title=None,
-            start=datetime(2026, 7, 8, 12),
-            end=datetime(2026, 7, 8, 13, tzinfo=UTC),
-            is_all_day=None,
-            notes=None,
-            location=None,
-            timezone="Asia/Shanghai",
+            target_ref=TargetRef(
+                resource_type="calendar_event",
+                item_id="event-1",
+                container_id="Personal",
+            ),
+            description=DescriptionUpdate(operation="set", value="New notes"),
+            completion_status=None,
+            expected_state_token="calendar-state:stale",
             source_refs=[],
             confirmed_by_user=False,
-            idempotency_key="calendar:update:naive",
+            idempotency_key="calendar:update:stale",
+        )
+
+    assert changed.value.code == "EXTERNAL_STATE_CHANGED"
+    assert backend.update_calls == []
+    assert len(backend.get_calls) == 1
+    with sidecar.connect() as connection:
+        result = connection.execute(
+            """
+            SELECT status, error_code
+            FROM idempotency_key
+            WHERE key = ? AND operation = 'calendar.update_event'
+            """,
+            ("calendar:update:stale",),
+        ).fetchone()
+    assert tuple(result) == ("failed", "EXTERNAL_STATE_CHANGED")
+
+
+def test_update_event_get_failure_is_retryable_failed_state_not_unknown(
+    tmp_path: Path,
+) -> None:
+    class GetFailureBackend(FakeCalendarBackend):
+        def get_event(self, **kwargs) -> CalendarEventRecord:
+            self.get_calls.append(kwargs)
+            raise CalendarBackendError("Calendar unavailable")
+
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = GetFailureBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(CalendarBackendError):
+        repository.update_event(
+            target_ref=TargetRef(
+                resource_type="calendar_event",
+                item_id="event-1",
+                container_id="Personal",
+            ),
+            description=DescriptionUpdate(operation="set", value="Updated"),
+            completion_status=None,
+            expected_state_token=None,
+            source_refs=[],
+            confirmed_by_user=False,
+            idempotency_key="calendar:update:get-failure",
         )
 
     assert backend.update_calls == []
+    with sidecar.connect() as connection:
+        state = connection.execute(
+            """
+            SELECT status, error_code
+            FROM idempotency_key
+            WHERE key = 'calendar:update:get-failure'
+            """
+        ).fetchone()
+    assert tuple(state) == ("failed", "BACKEND_FAILURE")
 
 
-def test_update_confirmed_action_requires_user_confirmation(tmp_path: Path) -> None:
+def test_update_event_marks_unverified_post_write_description_unknown(
+    tmp_path: Path,
+) -> None:
+    class UnverifiedDescriptionBackend(FakeCalendarBackend):
+        def get_event(self, **kwargs) -> CalendarEventRecord:
+            record = super().get_event(**kwargs)
+            if len(self.get_calls) == 2:
+                return record.model_copy(update={"notes": "Wrong notes"})
+            return record
+
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
     sidecar.initialize()
-    sidecar.upsert_mcp_item(
-        item_id="action_record:stable-1",
-        item_type="action_record",
-        external_id="event-1",
-        external_container_id="Personal",
-        title_hash="title-hash",
-        time_start="2026-07-06T10:00:00+00:00",
-        time_end="2026-07-06T11:00:00+00:00",
-        status_semantics="confirmed",
-        created_by_mcp=True,
-    )
-    repository = CalendarRepository(make_config(tmp_path), FakeCalendarBackend(), sidecar)
+    backend = UnverifiedDescriptionBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
 
-    with pytest.raises(ValueError, match="USER_CONFIRMATION_REQUIRED"):
+    with pytest.raises(ToolContractError) as unknown:
         repository.update_event(
-            calendar_id="Personal",
-            event_id="event-1",
-            title="Unsafe update",
-            start=None,
-            end=None,
-            is_all_day=None,
-            notes=None,
-            location=None,
-            timezone="Asia/Shanghai",
+            target_ref=TargetRef(
+                resource_type="calendar_event",
+                item_id="event-1",
+                container_id="Personal",
+            ),
+            description=DescriptionUpdate(operation="set", value="Expected notes"),
+            completion_status=None,
+            expected_state_token=None,
             source_refs=[],
             confirmed_by_user=False,
-            idempotency_key="calendar:update:confirmed-action",
+            idempotency_key="calendar:update:unverified",
         )
+
+    assert unknown.value.code == "EXTERNAL_STATE_UNKNOWN"
+    assert len(backend.update_calls) == 1

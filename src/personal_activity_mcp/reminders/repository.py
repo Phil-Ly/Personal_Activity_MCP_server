@@ -66,8 +66,15 @@ class ReminderBackend(Protocol):
         self,
         *,
         reminder_id: str,
-        list_ids: list[str],
+        list_id: str,
         completion_date: datetime,
+    ) -> ReminderRecord: ...
+
+    def get_reminder(
+        self,
+        *,
+        reminder_id: str,
+        list_id: str,
     ) -> ReminderRecord: ...
 
 
@@ -175,15 +182,18 @@ class ReminderRepository:
             raise ValueError("title must be a non-empty string")
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must be a non-empty string")
+        if priority is not None and priority not in {0, 1, 5, 9}:
+            raise ValueError("priority must be one of 0, 1, 5, or 9")
 
         normalized_source_refs = normalize_source_refs(source_refs)
+        normalized_priority = priority or 0
         request_hash = _request_hash(
             {
                 "list_id": list_id,
                 "title": title,
                 "notes": notes,
                 "due_date": due_date.isoformat() if due_date else None,
-                "priority": priority,
+                "priority": normalized_priority,
                 "source_refs": normalized_source_refs,
             }
         )
@@ -192,6 +202,12 @@ class ReminderRepository:
             idempotency_key=idempotency_key,
             operation="reminders.create_reminder",
             request_hash=request_hash,
+        )
+        write_control.audit_non_executable_reservation(
+            decision,
+            operation="reminders.create_reminder",
+            request_hash=request_hash,
+            confirmed_by_user=False,
         )
         _raise_for_non_executable_reservation(decision)
         if decision.status == "deduplicated":
@@ -222,8 +238,22 @@ class ReminderRepository:
                 idempotency_key=idempotency_key,
                 operation="reminders.create_reminder",
                 request_hash=request_hash,
-                confirmed_by_user=True,
+                confirmed_by_user=False,
                 error=error,
+            )
+        if not _created_reminder_matches_request(
+            record,
+            list_id=list_id,
+            due_date=due_date,
+            priority=normalized_priority,
+            timezone=self._default_timezone,
+        ):
+            _finalize_unverified_result(
+                write_control,
+                idempotency_key=idempotency_key,
+                operation="reminders.create_reminder",
+                request_hash=request_hash,
+                confirmed_by_user=False,
             )
         stable_id = _stable_reminder_item_id(idempotency_key)
         due_at = _normalize_due_at(record.due_date, self._default_timezone)
@@ -249,7 +279,7 @@ class ReminderRepository:
                     request_hash=request_hash,
                     result_status="succeeded",
                     error_code=None,
-                    confirmed_by_user=True,
+                    confirmed_by_user=False,
                 ),
             )
         except Exception as error:
@@ -272,64 +302,92 @@ class ReminderRepository:
     def complete_reminder(
         self,
         *,
-        reminder_id: str,
+        target_ref: TargetRef,
         completion_date: datetime,
+        expected_state_token: str | None,
         confirmed_by_user: bool,
         idempotency_key: str,
-        list_id: str | None = None,
     ) -> ReminderCompleteResult:
         """Mark an allowed Reminder as completed."""
-        if not confirmed_by_user:
-            raise ValueError("confirmed_by_user is required")
+        if target_ref.resource_type != "reminder" or target_ref.container_id is None:
+            raise ValueError("target_ref must identify one reminder and Reminder List")
+        reminder_id = target_ref.item_id
+        list_id = target_ref.container_id
+        source = self._reminder_sources.get(list_id)
+        if source is None:
+            raise ValueError(f"Unknown reminder list_ids: {list_id}")
+        if not source.allow_write:
+            raise ValueError(f"Reminder list is not allowed for writes: {list_id}")
         require_aware_datetime(completion_date, "completion_date")
-        list_ids = self._select_write_list_ids(list_id)
         if self._sidecar is None:
             raise ValueError("sidecar is required for reminders.complete_reminder")
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must be a non-empty string")
 
         request_payload: dict[str, object] = {
-            "reminder_id": reminder_id,
+            "target_ref": target_ref.model_dump(mode="json"),
             "completion_date": completion_date.isoformat(),
+            "expected_state_token": expected_state_token,
             "confirmed_by_user": confirmed_by_user,
-            "list_ids": list_ids,
         }
         request_hash = _request_hash(request_payload)
+        sidecar_item = self._sidecar.find_mcp_item_by_external(
+            item_type="reminder",
+            external_id=reminder_id,
+            external_container_id=list_id,
+        )
+        if not confirmed_by_user:
+            self._sidecar.record_operation_audit(
+                operation="reminders.complete_reminder",
+                target_item_id=str(sidecar_item["id"]) if sidecar_item is not None else None,
+                request_hash=request_hash,
+                result_status="blocked",
+                error_code="USER_CONFIRMATION_REQUIRED",
+                confirmed_by_user=False,
+            )
+            raise ValueError("confirmed_by_user is required")
+
         write_control = self._require_write_control()
         decision = write_control.reserve_operation(
             idempotency_key=idempotency_key,
             operation="reminders.complete_reminder",
             request_hash=request_hash,
         )
+        write_control.audit_non_executable_reservation(
+            decision,
+            operation="reminders.complete_reminder",
+            request_hash=request_hash,
+            confirmed_by_user=True,
+        )
         _raise_for_non_executable_reservation(decision)
         if decision.status == "deduplicated":
             item = self._sidecar.get_mcp_item(decision.result_item_id or "")
             if item is None:
                 raise ValueError("idempotency result item is missing")
-            audit_id = self._sidecar.record_operation_audit(
+            operation_result = write_control.get_operation_result(
+                idempotency_key=idempotency_key,
                 operation="reminders.complete_reminder",
-                target_item_id=str(item["id"]),
-                request_hash=request_hash,
-                result_status="deduplicated",
-                error_code=None,
-                confirmed_by_user=True,
             )
+            if operation_result is None or operation_result.audit_id is None:
+                raise ValueError("idempotency audit is missing")
             return ReminderCompleteResult(
                 reminder_id=str(item["external_id"]),
+                list_id=str(item["external_container_id"]),
+                stable_id=str(item["id"]),
                 is_completed=True,
                 completion_date=completion_date,
                 status_semantics="confirmed",
-                audit_id=audit_id,
+                deduplicated=True,
+                audit_id=operation_result.audit_id,
             )
 
         try:
-            record = self._backend.complete_reminder(
+            current = self._backend.get_reminder(
                 reminder_id=reminder_id,
-                list_ids=list_ids,
-                completion_date=completion_date,
+                list_id=list_id,
             )
         except Exception as error:
-            _finalize_backend_failure(
+            _finalize_preflight_backend_failure(
                 write_control,
                 idempotency_key=idempotency_key,
                 operation="reminders.complete_reminder",
@@ -337,20 +395,58 @@ class ReminderRepository:
                 confirmed_by_user=True,
                 error=error,
             )
-        if record.list_id not in list_ids:
-            write_control.finalize_failure(
+        if current.reminder_id != reminder_id or current.list_id != list_id:
+            _finalize_external_state_changed(
+                write_control,
                 idempotency_key=idempotency_key,
                 operation="reminders.complete_reminder",
-                status="external_state_unknown",
-                error_code="EXTERNAL_STATE_UNKNOWN",
-                audit=AuditWrite(
-                    request_hash=request_hash,
-                    result_status="external_state_unknown",
-                    error_code="EXTERNAL_STATE_UNKNOWN",
-                    confirmed_by_user=True,
-                ),
+                request_hash=request_hash,
             )
-            raise _external_state_unknown_error()
+        current_due_at = _normalize_due_at(current.due_date, self._default_timezone)
+        if (
+            expected_state_token is not None
+            and _reminder_state_token(current, due_at=current_due_at) != expected_state_token
+        ):
+            _finalize_external_state_changed(
+                write_control,
+                idempotency_key=idempotency_key,
+                operation="reminders.complete_reminder",
+                request_hash=request_hash,
+            )
+
+        already_satisfied = current.is_completed and current.completion_date == completion_date
+        if already_satisfied:
+            record = current
+        else:
+            try:
+                record = self._backend.complete_reminder(
+                    reminder_id=reminder_id,
+                    list_id=list_id,
+                    completion_date=completion_date,
+                )
+            except Exception as error:
+                _finalize_backend_failure(
+                    write_control,
+                    idempotency_key=idempotency_key,
+                    operation="reminders.complete_reminder",
+                    request_hash=request_hash,
+                    confirmed_by_user=True,
+                    error=error,
+                )
+        if (
+            record.reminder_id != reminder_id
+            or record.list_id != list_id
+            or not record.is_completed
+            or record.completion_date != completion_date
+        ):
+            _finalize_unverified_result(
+                write_control,
+                idempotency_key=idempotency_key,
+                operation="reminders.complete_reminder",
+                request_hash=request_hash,
+                confirmed_by_user=True,
+            )
+
         sidecar_item = self._sidecar.find_mcp_item_by_external(
             item_type="reminder",
             external_id=record.reminder_id,
@@ -392,27 +488,14 @@ class ReminderRepository:
             raise _external_state_unknown_error() from error
         return ReminderCompleteResult(
             reminder_id=record.reminder_id,
+            list_id=record.list_id,
+            stable_id=stable_id,
             is_completed=True,
-            completion_date=record.completion_date or completion_date,
+            completion_date=record.completion_date,
             status_semantics="confirmed",
+            deduplicated=False,
             audit_id=audit.audit_id,
         )
-
-    def _select_write_list_ids(self, list_id: str | None) -> list[str]:
-        if list_id is not None:
-            source = self._reminder_sources.get(list_id)
-            if source is None:
-                raise ValueError(f"Unknown reminder list_ids: {list_id}")
-            if not source.allow_write:
-                raise ValueError(f"Reminder list is not allowed for writes: {list_id}")
-            return [list_id]
-
-        list_ids = [
-            source.list_id for source in self._reminder_sources.values() if source.allow_write
-        ]
-        if not list_ids:
-            raise ValueError("No reminder lists are allowed for writes")
-        return list_ids
 
     def _select_list_ids(self, list_ids: list[str] | None) -> list[str]:
         if list_ids is None:
@@ -494,6 +577,24 @@ def _normalize_due_at(
         require_aware_datetime(value, "record.due_date")
         return value
     return datetime.combine(value, time.min, tzinfo=timezone)
+
+
+def _created_reminder_matches_request(
+    record: ReminderRecord,
+    *,
+    list_id: str,
+    due_date: date | None,
+    priority: int,
+    timezone: ZoneInfo,
+) -> bool:
+    actual_due_at = _normalize_due_at(record.due_date, timezone)
+    actual_due_date = actual_due_at.astimezone(timezone).date() if actual_due_at else None
+    return (
+        bool(record.reminder_id.strip())
+        and record.list_id == list_id
+        and actual_due_date == due_date
+        and (record.priority or 0) == priority
+    )
 
 
 def _record_matches_query(
@@ -660,6 +761,80 @@ def _finalize_backend_failure(
         ),
     )
     raise _external_state_unknown_error() from error
+
+
+def _finalize_preflight_backend_failure(
+    write_control: WriteControl,
+    *,
+    idempotency_key: str,
+    operation: str,
+    request_hash: str,
+    confirmed_by_user: bool,
+    error: Exception,
+) -> None:
+    write_control.finalize_failure(
+        idempotency_key=idempotency_key,
+        operation=operation,
+        status="failed",
+        error_code="BACKEND_FAILURE",
+        audit=AuditWrite(
+            request_hash=request_hash,
+            result_status="failed",
+            error_code="BACKEND_FAILURE",
+            confirmed_by_user=confirmed_by_user,
+        ),
+    )
+    raise error
+
+
+def _finalize_unverified_result(
+    write_control: WriteControl,
+    *,
+    idempotency_key: str,
+    operation: str,
+    request_hash: str,
+    confirmed_by_user: bool,
+) -> None:
+    write_control.finalize_failure(
+        idempotency_key=idempotency_key,
+        operation=operation,
+        status="external_state_unknown",
+        error_code="EXTERNAL_STATE_UNKNOWN",
+        audit=AuditWrite(
+            request_hash=request_hash,
+            result_status="external_state_unknown",
+            error_code="EXTERNAL_STATE_UNKNOWN",
+            confirmed_by_user=confirmed_by_user,
+        ),
+    )
+    raise _external_state_unknown_error()
+
+
+def _finalize_external_state_changed(
+    write_control: WriteControl,
+    *,
+    idempotency_key: str,
+    operation: str,
+    request_hash: str,
+) -> None:
+    write_control.finalize_failure(
+        idempotency_key=idempotency_key,
+        operation=operation,
+        status="failed",
+        error_code="EXTERNAL_STATE_CHANGED",
+        audit=AuditWrite(
+            request_hash=request_hash,
+            result_status="failed",
+            error_code="EXTERNAL_STATE_CHANGED",
+            confirmed_by_user=True,
+        ),
+    )
+    raise ToolContractError(
+        code="EXTERNAL_STATE_CHANGED",
+        message="The Reminder changed after it was read",
+        retryable=False,
+        public_message="The Reminder changed after it was read",
+    )
 
 
 def _external_state_unknown_error() -> ToolContractError:
