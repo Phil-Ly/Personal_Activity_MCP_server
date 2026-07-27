@@ -14,7 +14,6 @@ default_timezone = "Asia/Shanghai"
 sensitive_logging_enabled = false
 log_calendar_notes = false
 log_reminder_notes = false
-log_candidate_data = false
 log_source_refs = false
 
 [security]

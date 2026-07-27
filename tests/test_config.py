@@ -127,7 +127,6 @@ def test_load_config_defaults_to_private_and_strict_local_policy(tmp_path: Path)
     assert config.privacy.sensitive_logging_enabled is False
     assert config.privacy.log_calendar_notes is False
     assert config.privacy.log_reminder_notes is False
-    assert config.privacy.log_candidate_data is False
     assert config.privacy.log_source_refs is False
     assert config.security.allow_remote_transport is False
     assert config.security.allow_bulk_operations is False
@@ -145,7 +144,6 @@ def test_load_config_accepts_explicit_privacy_and_security_policy(tmp_path: Path
 sensitive_logging_enabled = false
 log_calendar_notes = false
 log_reminder_notes = false
-log_candidate_data = false
 log_source_refs = false
 
 [security]

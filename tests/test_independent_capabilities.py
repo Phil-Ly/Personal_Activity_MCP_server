@@ -144,7 +144,7 @@ def test_calendar_read_is_independent_from_all_write_capabilities(tmp_path: Path
     assert backend.update_calls == 0
 
 
-def test_calendar_write_needs_no_read_prompt_or_candidate_call(tmp_path: Path) -> None:
+def test_calendar_write_needs_no_read_or_prompt_call(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     write_config(config_path)
     backend = IndependentCalendarBackend()
@@ -179,7 +179,7 @@ def test_calendar_write_can_precede_public_read(tmp_path: Path) -> None:
     assert backend.list_calls == 1
 
 
-def test_review_prompt_is_independent_from_data_and_candidate_tools(tmp_path: Path) -> None:
+def test_review_prompt_is_independent_from_data_tools(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     write_config(config_path)
     backend = IndependentCalendarBackend()
@@ -197,34 +197,6 @@ def test_review_prompt_is_independent_from_data_and_candidate_tools(tmp_path: Pa
     assert "user context alone" in result.messages[0].content.text
     assert backend.list_calls == 0
     assert backend.create_calls == 0
-
-
-def test_candidate_crud_is_independent_from_external_capabilities(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    write_config(config_path)
-    backend = IndependentCalendarBackend()
-    server = create_server(config_path, calendar_backend=backend)
-
-    _, created = anyio.run(
-        server.call_tool,
-        "candidates.create",
-        {
-            "command": {
-                "action_type": "create_task",
-                "payload": {"title": "Independent candidate"},
-            }
-        },
-    )
-    _, loaded = anyio.run(
-        server.call_tool,
-        "candidates.get",
-        {"candidate_id": created["candidate_id"]},
-    )
-
-    assert loaded == created
-    assert backend.list_calls == 0
-    assert backend.create_calls == 0
-    assert backend.update_calls == 0
 
 
 def test_internal_target_reads_are_not_registered_as_public_tools(tmp_path: Path) -> None:

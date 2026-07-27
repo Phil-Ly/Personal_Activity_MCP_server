@@ -72,12 +72,111 @@ CREATE TABLE operation_audit (
 );
 """
 
+V2_SCHEMA = """
+CREATE TABLE schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO schema_version (version) VALUES (2);
+
+CREATE TABLE source (
+    id TEXT PRIMARY KEY,
+    source_type TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    source_uri TEXT NOT NULL,
+    config_key TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE mcp_item (
+    id TEXT PRIMARY KEY,
+    item_type TEXT NOT NULL,
+    external_id TEXT,
+    external_container_id TEXT,
+    title_hash TEXT,
+    time_start TEXT,
+    time_end TEXT,
+    status_semantics TEXT,
+    state_token TEXT,
+    created_by_mcp INTEGER NOT NULL,
+    deleted_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE action_candidate (
+    candidate_id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL,
+    action_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    target_ref_json TEXT,
+    decision_status TEXT NOT NULL,
+    execution_status TEXT NOT NULL,
+    issues_json TEXT NOT NULL DEFAULT '[]',
+    route_json TEXT,
+    result_ref_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TEXT
+);
+
+CREATE TABLE calendar_event_state (
+    item_id TEXT PRIMARY KEY,
+    completion_status TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE idempotency_key (
+    id TEXT PRIMARY KEY,
+    key TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    hash_version INTEGER NOT NULL,
+    result_item_id TEXT,
+    status TEXT NOT NULL,
+    error_code TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (key, operation)
+);
+
+CREATE TABLE source_link (
+    id TEXT PRIMARY KEY,
+    target_item_id TEXT,
+    target_candidate_id TEXT,
+    source_ref TEXT NOT NULL,
+    relation_type TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE operation_audit (
+    id TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    target_item_id TEXT,
+    target_candidate_id TEXT,
+    request_hash TEXT NOT NULL,
+    result_status TEXT NOT NULL,
+    error_code TEXT,
+    confirmed_by_user INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 
 def create_v1_database(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.executescript(V1_SCHEMA)
+    return connection
+
+
+def create_v2_database(database_path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(database_path)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.executescript(V2_SCHEMA)
     return connection
 
 
@@ -93,7 +192,7 @@ def column_names(database_path: Path, table_name: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
-def test_new_database_uses_schema_v2_and_private_filesystem_modes(
+def test_new_database_uses_candidate_free_schema_v3_and_private_filesystem_modes(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "secure-sidecar" / "state.sqlite3"
@@ -102,7 +201,6 @@ def test_new_database_uses_schema_v2_and_private_filesystem_modes(
     repository.initialize()
 
     assert table_names(database_path) == {
-        "action_candidate",
         "calendar_event_state",
         "idempotency_key",
         "mcp_item",
@@ -120,19 +218,18 @@ def test_new_database_uses_schema_v2_and_private_filesystem_modes(
         "hash_version",
         "status",
     }
-    assert column_names(database_path, "source_link") >= {
-        "target_item_id",
-        "target_candidate_id",
-    }
+    assert column_names(database_path, "source_link") >= {"target_item_id"}
+    assert "target_candidate_id" not in column_names(database_path, "source_link")
+    assert "target_candidate_id" not in column_names(database_path, "operation_audit")
     with sqlite3.connect(database_path) as connection:
         versions = connection.execute(
             "SELECT version FROM schema_version ORDER BY version"
         ).fetchall()
-    assert versions == [(2,)]
+    assert versions == [(3,)]
     assert stat.S_IMODE(database_path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(database_path.stat().st_mode) == 0o600
     assert repository.last_migration_backup_path is None
-    assert list(database_path.parent.glob("*.pre-v2-*.sqlite3")) == []
+    assert list(database_path.parent.glob("*.pre-v3-*.sqlite3")) == []
 
 
 def test_initialize_rejects_insecure_existing_parent_without_changing_its_mode(
@@ -225,12 +322,11 @@ def test_schema_v1_migration_preserves_existing_rows(tmp_path: Path) -> None:
     assert idempotency["hash_version"] == 1
     assert idempotency["status"] == "succeeded"
     assert source_link["target_item_id"] == "calendar:event-1"
-    assert source_link["target_candidate_id"] is None
     assert audit["id"] == "audit-1"
     assert audit["target_item_id"] == "calendar:event-1"
 
 
-def test_schema_v1_migration_creates_private_pre_v2_backup(tmp_path: Path) -> None:
+def test_schema_v1_migration_creates_private_pre_v3_backup(tmp_path: Path) -> None:
     database_path = tmp_path / "state.sqlite3"
     with create_v1_database(database_path) as connection:
         connection.execute(
@@ -244,7 +340,7 @@ def test_schema_v1_migration_creates_private_pre_v2_backup(tmp_path: Path) -> No
     repository = SidecarRepository(database_path)
     repository.initialize()
 
-    backup_paths = list(tmp_path.glob("state.pre-v2-*.sqlite3"))
+    backup_paths = list(tmp_path.glob("state.pre-v3-*.sqlite3"))
     assert len(backup_paths) == 1
     backup_path = backup_paths[0]
     assert repository.last_migration_backup_path == backup_path
@@ -360,11 +456,107 @@ def test_schema_v1_migration_rolls_back_all_changes_on_failure(tmp_path: Path) -
     with sqlite3.connect(database_path) as connection:
         versions = connection.execute("SELECT version FROM schema_version").fetchall()
     assert versions == [(1,)]
-    backup_paths = list(tmp_path.glob("state.pre-v2-*.sqlite3"))
+    backup_paths = list(tmp_path.glob("state.pre-v3-*.sqlite3"))
     assert len(backup_paths) == 1
     with sqlite3.connect(backup_paths[0]) as connection:
         backup_versions = connection.execute("SELECT version FROM schema_version").fetchall()
     assert backup_versions == [(1,)]
+
+
+def test_schema_v2_migration_removes_candidate_state_and_preserves_write_state(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "state.sqlite3"
+    with create_v2_database(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO mcp_item (
+                id, item_type, external_id, external_container_id,
+                status_semantics, created_by_mcp
+            )
+            VALUES (
+                'calendar:event-1', 'calendar_event', 'event-1',
+                'Personal', 'planned', 1
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO action_candidate (
+                candidate_id, version, action_type, payload_json,
+                decision_status, execution_status
+            )
+            VALUES (
+                'candidate-1', 1, 'none', '{}', 'pending', 'not_started'
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO source_link (
+                id, target_item_id, target_candidate_id, source_ref, relation_type
+            )
+            VALUES (?, ?, ?, ?, 'supported_by')
+            """,
+            [
+                ("item-link", "calendar:event-1", None, "file:item"),
+                ("candidate-link", None, "candidate-1", "file:candidate"),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO operation_audit (
+                id, operation, target_item_id, target_candidate_id,
+                request_hash, result_status, error_code, confirmed_by_user
+            )
+            VALUES (?, ?, ?, ?, ?, ?, NULL, 1)
+            """,
+            [
+                (
+                    "write-audit",
+                    "calendar.create_event",
+                    "calendar:event-1",
+                    None,
+                    "write-hash",
+                    "succeeded",
+                ),
+                (
+                    "blocked-audit",
+                    "calendar.update_event",
+                    None,
+                    None,
+                    "blocked-hash",
+                    "blocked",
+                ),
+                (
+                    "candidate-audit",
+                    "candidates.create",
+                    None,
+                    "candidate-1",
+                    "candidate-hash",
+                    "created",
+                ),
+            ],
+        )
+
+    repository = SidecarRepository(database_path)
+    repository.initialize()
+
+    assert "action_candidate" not in table_names(database_path)
+    assert "target_candidate_id" not in column_names(database_path, "source_link")
+    assert "target_candidate_id" not in column_names(database_path, "operation_audit")
+    with sqlite3.connect(database_path) as connection:
+        version = connection.execute("SELECT version FROM schema_version").fetchone()[0]
+        links = connection.execute(
+            "SELECT id, target_item_id, source_ref FROM source_link"
+        ).fetchall()
+        audits = connection.execute("SELECT id FROM operation_audit ORDER BY id").fetchall()
+    assert version == 3
+    assert links == [("item-link", "calendar:event-1", "file:item")]
+    assert audits == [("blocked-audit",), ("write-audit",)]
+    backup_paths = list(tmp_path.glob("state.pre-v3-*.sqlite3"))
+    assert len(backup_paths) == 1
+    assert "action_candidate" in table_names(backup_paths[0])
 
 
 def test_initialize_marks_only_abandoned_pending_operations_unknown(
@@ -407,7 +599,7 @@ def test_initialize_marks_only_abandoned_pending_operations_unknown(
     }
 
 
-def test_source_link_requires_exactly_one_existing_target(tmp_path: Path) -> None:
+def test_source_link_requires_one_existing_item_target(tmp_path: Path) -> None:
     database_path = tmp_path / "state.sqlite3"
     repository = SidecarRepository(database_path)
     repository.initialize()
@@ -422,32 +614,14 @@ def test_source_link_requires_exactly_one_existing_target(tmp_path: Path) -> Non
         status_semantics="planned",
         created_by_mcp=True,
     )
-    with repository.connect() as connection:
-        connection.execute(
-            """
-            INSERT INTO action_candidate (
-                candidate_id,
-                version,
-                action_type,
-                payload_json,
-                decision_status,
-                execution_status
-            )
-            VALUES (
-                'candidate-1', 1, 'none', '{}', 'pending', 'not_started'
-            )
-            """
-        )
-
     with pytest.raises(sqlite3.IntegrityError), repository.connect() as connection:
         connection.execute(
             """
             INSERT INTO source_link (
-                id, target_item_id, target_candidate_id, source_ref, relation_type
+                id, target_item_id, source_ref, relation_type
             )
             VALUES (
-                'invalid-both', 'calendar:event-1', 'candidate-1',
-                'file:a', 'supported_by'
+                'missing-target', 'calendar:missing', 'file:a', 'supported_by'
             )
             """
         )
@@ -455,9 +629,9 @@ def test_source_link_requires_exactly_one_existing_target(tmp_path: Path) -> Non
         connection.execute(
             """
             INSERT INTO source_link (
-                id, target_item_id, target_candidate_id, source_ref, relation_type
+                id, target_item_id, source_ref, relation_type
             )
-            VALUES ('invalid-neither', NULL, NULL, 'file:a', 'supported_by')
+            VALUES ('missing-identity', NULL, 'file:a', 'supported_by')
             """
         )
 
@@ -465,13 +639,12 @@ def test_source_link_requires_exactly_one_existing_target(tmp_path: Path) -> Non
         connection.execute(
             """
             INSERT INTO source_link (
-                id, target_item_id, target_candidate_id, source_ref, relation_type
+                id, target_item_id, source_ref, relation_type
             )
-            VALUES ('candidate-link', NULL, 'candidate-1', 'file:a', 'supported_by')
+            VALUES ('item-link', 'calendar:event-1', 'file:a', 'supported_by')
             """
         )
-        candidate_link = connection.execute(
-            "SELECT * FROM source_link WHERE id = 'candidate-link'"
+        item_link = connection.execute(
+            "SELECT * FROM source_link WHERE id = 'item-link'"
         ).fetchone()
-    assert candidate_link["target_item_id"] is None
-    assert candidate_link["target_candidate_id"] == "candidate-1"
+    assert item_link["target_item_id"] == "calendar:event-1"

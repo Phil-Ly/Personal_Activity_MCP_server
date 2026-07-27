@@ -5,16 +5,18 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable
 
-LATEST_SCHEMA_VERSION = 2
+LATEST_SCHEMA_VERSION = 3
 
 
 def initialize_schema(connection: sqlite3.Connection) -> None:
     """Create or migrate the database inside the caller's transaction."""
     current_version = current_schema_version(connection)
     if current_version is None:
-        _create_v2_schema(connection)
+        _create_v3_schema(connection)
     elif current_version == 1:
-        _migrate_v1_to_v2(connection)
+        _migrate_v1_to_v3(connection)
+    elif current_version == 2:
+        _migrate_v2_to_v3(connection)
     elif current_version != LATEST_SCHEMA_VERSION:
         raise sqlite3.DatabaseError(f"Unsupported sidecar schema version: {current_version}")
 
@@ -46,8 +48,8 @@ def current_schema_version(connection: sqlite3.Connection) -> int | None:
     return int(version_row[0])
 
 
-def _create_v2_schema(connection: sqlite3.Connection) -> None:
-    for statement in _V2_SCHEMA_STATEMENTS:
+def _create_v3_schema(connection: sqlite3.Connection) -> None:
+    for statement in _V3_SCHEMA_STATEMENTS:
         connection.execute(statement)
     connection.execute(
         "INSERT INTO schema_version (version) VALUES (?)",
@@ -55,7 +57,7 @@ def _create_v2_schema(connection: sqlite3.Connection) -> None:
     )
 
 
-def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+def _migrate_v1_to_v3(connection: sqlite3.Connection) -> None:
     old_items = connection.execute(
         """
         SELECT
@@ -86,7 +88,7 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
     ):
         connection.execute(f"ALTER TABLE {table_name} RENAME TO {table_name}_v1")
 
-    for statement in _V2_SCHEMA_STATEMENTS[1:]:
+    for statement in _V3_SCHEMA_STATEMENTS[1:]:
         connection.execute(statement)
 
     connection.execute(
@@ -100,9 +102,9 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
         """
     )
     _copy_merged_items(connection, old_items, keeper_by_item_id)
-    _copy_idempotency(connection, keeper_by_item_id)
-    _copy_source_links(connection, keeper_by_item_id)
-    _copy_audits(connection, keeper_by_item_id)
+    _copy_v1_idempotency(connection, keeper_by_item_id)
+    _copy_v1_source_links(connection, keeper_by_item_id)
+    _copy_v1_audits(connection, keeper_by_item_id)
 
     for table_name in (
         "source_link_v1",
@@ -112,6 +114,58 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
         "source_v1",
     ):
         connection.execute(f"DROP TABLE {table_name}")
+    _set_schema_version(connection)
+
+
+def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE source_link RENAME TO source_link_v2")
+    connection.execute("ALTER TABLE operation_audit RENAME TO operation_audit_v2")
+    connection.execute(_SOURCE_LINK_SCHEMA)
+    connection.execute(_OPERATION_AUDIT_SCHEMA)
+
+    connection.execute(
+        """
+        INSERT INTO source_link (
+            id, target_item_id, source_ref, relation_type, created_at
+        )
+        SELECT
+            id, target_item_id, source_ref, relation_type, created_at
+        FROM source_link_v2
+        WHERE target_item_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO operation_audit (
+            id,
+            operation,
+            target_item_id,
+            request_hash,
+            result_status,
+            error_code,
+            confirmed_by_user,
+            created_at
+        )
+        SELECT
+            id,
+            operation,
+            target_item_id,
+            request_hash,
+            result_status,
+            error_code,
+            confirmed_by_user,
+            created_at
+        FROM operation_audit_v2
+        WHERE target_candidate_id IS NULL
+        """
+    )
+    connection.execute("DROP TABLE source_link_v2")
+    connection.execute("DROP TABLE operation_audit_v2")
+    connection.execute("DROP TABLE action_candidate")
+    _set_schema_version(connection)
+
+
+def _set_schema_version(connection: sqlite3.Connection) -> None:
     connection.execute("DELETE FROM schema_version")
     connection.execute(
         "INSERT INTO schema_version (version) VALUES (?)",
@@ -119,7 +173,7 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
     )
 
 
-def _copy_idempotency(
+def _copy_v1_idempotency(
     connection: sqlite3.Connection,
     keeper_by_item_id: dict[str, str],
 ) -> None:
@@ -167,7 +221,7 @@ def _copy_idempotency(
         )
 
 
-def _copy_source_links(
+def _copy_v1_source_links(
     connection: sqlite3.Connection,
     keeper_by_item_id: dict[str, str],
 ) -> None:
@@ -184,12 +238,11 @@ def _copy_source_links(
             INSERT INTO source_link (
                 id,
                 target_item_id,
-                target_candidate_id,
                 source_ref,
                 relation_type,
                 created_at
             )
-            VALUES (?, ?, NULL, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 row["id"],
@@ -201,7 +254,7 @@ def _copy_source_links(
         )
 
 
-def _copy_audits(
+def _copy_v1_audits(
     connection: sqlite3.Connection,
     keeper_by_item_id: dict[str, str],
 ) -> None:
@@ -227,14 +280,13 @@ def _copy_audits(
                 id,
                 operation,
                 target_item_id,
-                target_candidate_id,
                 request_hash,
                 result_status,
                 error_code,
                 confirmed_by_user,
                 created_at
             )
-            VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["id"],
@@ -325,7 +377,34 @@ def _mapped_item_id(
     return keeper_by_item_id[str(item_id)]
 
 
-_V2_SCHEMA_STATEMENTS = (
+_SOURCE_LINK_SCHEMA = """
+CREATE TABLE source_link (
+    id TEXT PRIMARY KEY,
+    target_item_id TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    relation_type TEXT NOT NULL CHECK (
+        relation_type IN ('created_from', 'supported_by', 'updated_from')
+    ),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (target_item_id) REFERENCES mcp_item(id) ON DELETE CASCADE
+)
+"""
+
+_OPERATION_AUDIT_SCHEMA = """
+CREATE TABLE operation_audit (
+    id TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    target_item_id TEXT,
+    request_hash TEXT NOT NULL,
+    result_status TEXT NOT NULL,
+    error_code TEXT,
+    confirmed_by_user INTEGER NOT NULL CHECK (confirmed_by_user IN (0, 1)),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (target_item_id) REFERENCES mcp_item(id)
+)
+"""
+
+_V3_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE schema_version (
         version INTEGER PRIMARY KEY,
@@ -368,35 +447,6 @@ _V2_SCHEMA_STATEMENTS = (
     WHERE external_id IS NOT NULL AND external_container_id IS NOT NULL
     """,
     """
-    CREATE TABLE action_candidate (
-        candidate_id TEXT PRIMARY KEY,
-        version INTEGER NOT NULL CHECK (version >= 1),
-        action_type TEXT NOT NULL CHECK (
-            action_type IN (
-                'create_event',
-                'update_event',
-                'create_task',
-                'complete_task',
-                'none'
-            )
-        ),
-        payload_json TEXT NOT NULL,
-        target_ref_json TEXT,
-        decision_status TEXT NOT NULL CHECK (
-            decision_status IN ('pending', 'confirmed', 'rejected')
-        ),
-        execution_status TEXT NOT NULL CHECK (
-            execution_status IN ('not_started', 'in_progress', 'succeeded', 'failed')
-        ),
-        issues_json TEXT NOT NULL DEFAULT '[]',
-        route_json TEXT,
-        result_ref_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        deleted_at TEXT
-    )
-    """,
-    """
     CREATE TABLE calendar_event_state (
         item_id TEXT PRIMARY KEY,
         completion_status TEXT NOT NULL CHECK (
@@ -424,40 +474,6 @@ _V2_SCHEMA_STATEMENTS = (
         FOREIGN KEY (result_item_id) REFERENCES mcp_item(id)
     )
     """,
-    """
-    CREATE TABLE source_link (
-        id TEXT PRIMARY KEY,
-        target_item_id TEXT,
-        target_candidate_id TEXT,
-        source_ref TEXT NOT NULL,
-        relation_type TEXT NOT NULL CHECK (
-            relation_type IN ('created_from', 'supported_by', 'updated_from')
-        ),
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        CHECK (
-            (target_item_id IS NOT NULL AND target_candidate_id IS NULL)
-            OR
-            (target_item_id IS NULL AND target_candidate_id IS NOT NULL)
-        ),
-        FOREIGN KEY (target_item_id) REFERENCES mcp_item(id) ON DELETE CASCADE,
-        FOREIGN KEY (target_candidate_id)
-            REFERENCES action_candidate(candidate_id) ON DELETE CASCADE
-    )
-    """,
-    """
-    CREATE TABLE operation_audit (
-        id TEXT PRIMARY KEY,
-        operation TEXT NOT NULL,
-        target_item_id TEXT,
-        target_candidate_id TEXT,
-        request_hash TEXT NOT NULL,
-        result_status TEXT NOT NULL,
-        error_code TEXT,
-        confirmed_by_user INTEGER NOT NULL CHECK (confirmed_by_user IN (0, 1)),
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        CHECK (target_item_id IS NULL OR target_candidate_id IS NULL),
-        FOREIGN KEY (target_item_id) REFERENCES mcp_item(id),
-        FOREIGN KEY (target_candidate_id) REFERENCES action_candidate(candidate_id)
-    )
-    """,
+    _SOURCE_LINK_SCHEMA,
+    _OPERATION_AUDIT_SCHEMA,
 )

@@ -45,7 +45,6 @@ class PrivacyConfig:
     sensitive_logging_enabled: bool = False
     log_calendar_notes: bool = False
     log_reminder_notes: bool = False
-    log_candidate_data: bool = False
     log_source_refs: bool = False
 
 
@@ -138,7 +137,6 @@ def _parse_privacy_config(raw_privacy: object) -> PrivacyConfig:
             "sensitive_logging_enabled",
             "log_calendar_notes",
             "log_reminder_notes",
-            "log_candidate_data",
             "log_source_refs",
         },
         "privacy",
@@ -157,20 +155,13 @@ def _parse_privacy_config(raw_privacy: object) -> PrivacyConfig:
             raw_privacy.get("log_reminder_notes", False),
             "privacy.log_reminder_notes",
         ),
-        log_candidate_data=_parse_bool(
-            raw_privacy.get("log_candidate_data", False),
-            "privacy.log_candidate_data",
-        ),
         log_source_refs=_parse_bool(
             raw_privacy.get("log_source_refs", False),
             "privacy.log_source_refs",
         ),
     )
     if not config.sensitive_logging_enabled and (
-        config.log_calendar_notes
-        or config.log_reminder_notes
-        or config.log_candidate_data
-        or config.log_source_refs
+        config.log_calendar_notes or config.log_reminder_notes or config.log_source_refs
     ):
         raise ConfigError("Sensitive logging detail flags require sensitive_logging_enabled = true")
     return config

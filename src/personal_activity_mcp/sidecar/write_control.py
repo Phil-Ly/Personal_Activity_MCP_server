@@ -250,11 +250,10 @@ class WriteControl:
                         INSERT INTO source_link (
                             id,
                             target_item_id,
-                            target_candidate_id,
                             source_ref,
                             relation_type
                         )
-                        VALUES (?, ?, NULL, ?, ?)
+                        VALUES (?, ?, ?, ?)
                         ON CONFLICT(id) DO NOTHING
                         """,
                         (
@@ -460,13 +459,12 @@ def _insert_audit(
             id,
             operation,
             target_item_id,
-            target_candidate_id,
             request_hash,
             result_status,
             error_code,
             confirmed_by_user
         )
-        VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             audit.audit_id,

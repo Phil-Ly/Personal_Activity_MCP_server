@@ -68,7 +68,6 @@ def test_review_summary_prompt_supports_arbitrary_period_and_optional_focus(
     assert "reasonable inferences" in folded_text
     assert "unconfirmed items" in folded_text
     assert "future plans" in folded_text
-    assert "action_candidates" not in folded_text
 
 
 def test_review_summary_prompt_works_with_only_user_context(tmp_path: Path) -> None:

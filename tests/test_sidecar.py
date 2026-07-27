@@ -21,7 +21,6 @@ def test_initialize_creates_only_current_required_tables(tmp_path: Path) -> None
     repository.initialize()
 
     assert table_names(database_path) == {
-        "action_candidate",
         "calendar_event_state",
         "source",
         "mcp_item",

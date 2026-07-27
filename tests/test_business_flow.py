@@ -84,7 +84,12 @@ def call_tool(server, name: str, arguments: dict[str, object]):
     return anyio.run(server.call_tool, name, arguments)[1]
 
 
-def create_calendar(server, *, idempotency_key: str):
+def create_calendar(
+    server,
+    *,
+    idempotency_key: str,
+    source_refs: list[str],
+):
     return call_tool(
         server,
         "calendar.create_event",
@@ -97,70 +102,13 @@ def create_calendar(server, *, idempotency_key: str):
             "notes": "Created from review",
             "location": None,
             "timezone": "Asia/Shanghai",
-            "source_refs": ["calendar:source-event"],
+            "source_refs": source_refs,
             "idempotency_key": idempotency_key,
         },
     )
 
 
-def start_candidate(server, *, source_ref: str, idempotency_key: str):
-    created = call_tool(
-        server,
-        "candidates.create",
-        {
-            "command": {
-                "action_type": "create_event",
-                "payload": {
-                    "title": "Follow-up session",
-                    "start": "2026-07-28T10:00:00+00:00",
-                    "end": "2026-07-28T11:00:00+00:00",
-                    "description": "Created from review",
-                },
-                "source_refs": [source_ref],
-            }
-        },
-    )
-    confirmed = call_tool(
-        server,
-        "candidates.update",
-        {
-            "candidate_id": created["candidate_id"],
-            "command": {
-                "expected_version": created["version"],
-                "decision_status": "confirmed",
-            },
-        },
-    )
-    routed = call_tool(
-        server,
-        "candidates.update",
-        {
-            "candidate_id": created["candidate_id"],
-            "command": {
-                "expected_version": confirmed["version"],
-                "route": {
-                    "provider": "personal_activity_mcp",
-                    "tool_name": "calendar.create_event",
-                    "operation": "calendar.create_event",
-                    "idempotency_key": idempotency_key,
-                },
-            },
-        },
-    )
-    return call_tool(
-        server,
-        "candidates.update",
-        {
-            "candidate_id": created["candidate_id"],
-            "command": {
-                "expected_version": routed["version"],
-                "execution_status": "in_progress",
-            },
-        },
-    )
-
-
-def test_typical_read_candidate_confirm_route_write_and_register_flow(
+def test_evidence_can_flow_directly_into_an_idempotent_calendar_write(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "config.toml"
@@ -177,84 +125,37 @@ def test_typical_read_candidate_confirm_route_write_and_register_flow(
             "end": "2026-07-29T00:00:00+00:00",
         },
     )
-    source = listed["events"][0]
-    key = "business-flow:create"
-    started = start_candidate(
+    source_ref = listed["events"][0]["evidence_id"]
+
+    created = create_calendar(
         server,
-        source_ref=source["evidence_id"],
-        idempotency_key=key,
+        idempotency_key="business-flow:create",
+        source_refs=[source_ref],
     )
-    write_result = create_calendar(server, idempotency_key=key)
-    finished = call_tool(
+    repeated = create_calendar(
         server,
-        "candidates.update",
-        {
-            "candidate_id": started["candidate_id"],
-            "command": {
-                "expected_version": started["version"],
-                "execution_status": "succeeded",
-                "result_ref": {
-                    "provider": "personal_activity_mcp",
-                    "status": "succeeded",
-                    "item_id": write_result["stable_id"],
-                    "container_id": "Personal",
-                    "verification_source": "agent_reported",
-                },
-            },
-        },
+        idempotency_key="business-flow:create",
+        source_refs=[source_ref],
     )
 
-    assert started["decision_status"] == "confirmed"
-    assert started["execution_status"] == "in_progress"
-    assert finished["execution_status"] == "succeeded"
-    assert finished["result_ref"]["item_id"] == write_result["stable_id"]
-    assert finished["result_ref"]["verification_source"] == "sidecar_verified"
-    assert finished["result_ref"]["audit_id"] is not None
+    assert created["created"] is True
+    assert created["source_refs"] == [source_ref]
+    assert repeated["created"] is False
+    assert repeated["deduplicated"] is True
     assert backend.create_calls == 1
 
 
-def test_direct_calendar_write_without_candidate_is_valid(tmp_path: Path) -> None:
+def test_direct_calendar_write_without_public_read_is_valid(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     write_config(config_path)
     backend = FlowCalendarBackend()
     server = create_server(config_path, calendar_backend=backend)
 
-    result = create_calendar(server, idempotency_key="direct-flow:create")
-    candidates = call_tool(server, "candidates.list", {"query": {}})
+    result = create_calendar(
+        server,
+        idempotency_key="direct-flow:create",
+        source_refs=[],
+    )
 
     assert result["created"] is True
-    assert candidates["candidates"] == []
-    assert backend.create_calls == 1
-
-
-def test_interrupted_candidate_terminal_registration_reconciles_without_rewrite(
-    tmp_path: Path,
-) -> None:
-    config_path = tmp_path / "config.toml"
-    write_config(config_path)
-    backend = FlowCalendarBackend()
-    server = create_server(config_path, calendar_backend=backend)
-    key = "interrupted-flow:create"
-    started = start_candidate(
-        server,
-        source_ref="agent:file-record-1",
-        idempotency_key=key,
-    )
-
-    write_result = create_calendar(server, idempotency_key=key)
-    reconciled = call_tool(
-        server,
-        "candidates.update",
-        {
-            "candidate_id": started["candidate_id"],
-            "command": {
-                "expected_version": started["version"],
-                "reconcile_execution": True,
-            },
-        },
-    )
-
-    assert reconciled["execution_status"] == "succeeded"
-    assert reconciled["result_ref"]["item_id"] == write_result["stable_id"]
-    assert reconciled["result_ref"]["verification_source"] == "sidecar_verified"
     assert backend.create_calls == 1

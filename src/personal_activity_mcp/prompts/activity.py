@@ -42,7 +42,7 @@ Use the available subset of:
 - Reminder Evidence already returned by reminders.list_reminders.
 
 The Prompt remains useful with user context alone. Do not require Calendar, Reminder,
-Candidate, or file data to be present.
+or file data to be present.
 
 Treat source records as evidence, not automatically confirmed business facts. Past Calendar
 events show that something was scheduled; past Calendar events do not prove completion.

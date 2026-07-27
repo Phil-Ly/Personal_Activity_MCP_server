@@ -13,6 +13,7 @@ from typing import Literal
 
 from personal_activity_mcp.config import CalendarSource, ReminderSource
 from personal_activity_mcp.sidecar.migrations import (
+    LATEST_SCHEMA_VERSION,
     current_schema_version,
     initialize_schema,
 )
@@ -69,8 +70,12 @@ class SidecarRepository:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = OFF")
         try:
-            if current_schema_version(connection) == 1:
-                self._last_migration_backup_path = self._create_pre_v2_backup(connection)
+            installed_version = current_schema_version(connection)
+            if installed_version is not None and installed_version < LATEST_SCHEMA_VERSION:
+                self._last_migration_backup_path = self._create_migration_backup(
+                    connection,
+                    target_version=LATEST_SCHEMA_VERSION,
+                )
             connection.execute("BEGIN IMMEDIATE")
             initialize_schema(connection)
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
@@ -95,9 +100,14 @@ class SidecarRepository:
         os.close(descriptor)
         os.chmod(self._database_path, 0o600)
 
-    def _create_pre_v2_backup(self, connection: sqlite3.Connection) -> Path:
+    def _create_migration_backup(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        target_version: int,
+    ) -> Path:
         backup_path = self._database_path.with_name(
-            f"{self._database_path.stem}.pre-v2-{uuid.uuid4().hex}.sqlite3"
+            f"{self._database_path.stem}.pre-v{target_version}-{uuid.uuid4().hex}.sqlite3"
         )
         descriptor = os.open(
             backup_path,
