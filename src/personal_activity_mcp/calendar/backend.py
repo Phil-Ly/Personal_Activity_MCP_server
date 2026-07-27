@@ -3,25 +3,22 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from personal_activity_mcp.calendar.models import CalendarEventRecord, DescriptionUpdate
+from personal_activity_mcp.common.jxa import (
+    JXABackendError,
+    optional_json_string,
+    required_json_bool,
+    required_json_string,
+    run_jxa,
+)
 
 
-class CalendarBackendError(RuntimeError):
+class CalendarBackendError(JXABackendError):
     """Raised when Calendar.app automation fails."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        external_state_changed: bool | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.external_state_changed = external_state_changed
 
 
 class MacOSCalendarBackend:
@@ -49,10 +46,7 @@ class MacOSCalendarBackend:
                 "true" if include_location else "false",
             ],
         )
-        rows = json.loads(payload)
-        if not isinstance(rows, list):
-            raise CalendarBackendError("Calendar list_events returned a non-list payload")
-        return [_record_from_payload(row) for row in rows]
+        return _records_from_json(payload, operation="list_events")
 
     def create_event(
         self,
@@ -79,10 +73,7 @@ class MacOSCalendarBackend:
                 timezone,
             ],
         )
-        row = json.loads(payload)
-        if not isinstance(row, dict):
-            raise CalendarBackendError("Calendar create_event returned a non-object payload")
-        return _record_from_payload(row)
+        return _record_from_json(payload, operation="create_event")
 
     def update_event(
         self,
@@ -100,10 +91,7 @@ class MacOSCalendarBackend:
                 description.value or "",
             ],
         )
-        row = json.loads(payload)
-        if not isinstance(row, dict):
-            raise CalendarBackendError("Calendar update_event returned a non-object payload")
-        return _record_from_payload(row)
+        return _record_from_json(payload, operation="update_event")
 
     def get_event(
         self,
@@ -115,46 +103,57 @@ class MacOSCalendarBackend:
             _GET_EVENT_JXA,
             [calendar_id, event_id],
         )
-        row = json.loads(payload)
-        if not isinstance(row, dict):
-            raise CalendarBackendError("Calendar get_event returned a non-object payload")
-        return _record_from_payload(row)
+        return _record_from_json(payload, operation="get_event")
 
     def _run_jxa(self, script: str, args: list[str]) -> str:
-        try:
-            result = subprocess.run(
-                [str(self._osascript_path), "-l", "JavaScript", "-e", script, *args],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise CalendarBackendError(
-                f"Unable to run osascript: {error}",
-                external_state_changed=False,
-            ) from error
-        if result.returncode != 0:
-            message = result.stderr.strip() or result.stdout.strip() or "unknown Calendar error"
-            raise CalendarBackendError(f"Calendar automation failed: {message}")
-        return result.stdout.strip()
+        return run_jxa(
+            self._osascript_path,
+            script,
+            args,
+            application_name="Calendar",
+            error_type=CalendarBackendError,
+        )
 
 
 def _record_from_payload(row: Any) -> CalendarEventRecord:
     if not isinstance(row, dict):
         raise CalendarBackendError("Calendar event row must be an object")
+    start = required_json_string(row, "start")
+    end = required_json_string(row, "end")
+    start_date = optional_json_string(row, "start_date")
+    end_date = optional_json_string(row, "end_date")
     return CalendarEventRecord(
-        event_id=str(row["event_id"]),
-        calendar_id=str(row["calendar_id"]),
-        title=str(row["title"]),
-        start=datetime.fromisoformat(str(row["start"])),
-        end=datetime.fromisoformat(str(row["end"])),
-        is_all_day=bool(row["is_all_day"]),
-        start_date=date.fromisoformat(str(row["start_date"])) if row.get("start_date") else None,
-        end_date=date.fromisoformat(str(row["end_date"])) if row.get("end_date") else None,
-        location=str(row["location"]) if row.get("location") else None,
-        notes=str(row["notes"]) if row.get("notes") else None,
+        event_id=required_json_string(row, "event_id"),
+        calendar_id=required_json_string(row, "calendar_id"),
+        title=required_json_string(row, "title"),
+        start=datetime.fromisoformat(start),
+        end=datetime.fromisoformat(end),
+        is_all_day=required_json_bool(row, "is_all_day"),
+        start_date=date.fromisoformat(start_date) if start_date is not None else None,
+        end_date=date.fromisoformat(end_date) if end_date is not None else None,
+        location=optional_json_string(row, "location"),
+        notes=optional_json_string(row, "notes"),
     )
+
+
+def _record_from_json(payload: str, *, operation: str) -> CalendarEventRecord:
+    try:
+        row = json.loads(payload)
+        if not isinstance(row, dict):
+            raise TypeError("expected an object")
+        return _record_from_payload(row)
+    except (KeyError, TypeError, ValueError) as error:
+        raise CalendarBackendError(f"Calendar {operation} returned an invalid payload") from error
+
+
+def _records_from_json(payload: str, *, operation: str) -> list[CalendarEventRecord]:
+    try:
+        rows = json.loads(payload)
+        if not isinstance(rows, list):
+            raise TypeError("expected a list")
+        return [_record_from_payload(row) for row in rows]
+    except (KeyError, TypeError, ValueError) as error:
+        raise CalendarBackendError(f"Calendar {operation} returned an invalid payload") from error
 
 
 _LIST_EVENTS_JXA = r"""

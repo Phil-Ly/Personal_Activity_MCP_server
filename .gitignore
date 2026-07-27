@@ -47,6 +47,7 @@ EVALS.md
 
 # Local editable diagrams
 personal-activity-core-business-flow.drawio
+.$*.drawio.dtmp
 
 # Environment files and secrets
 .env

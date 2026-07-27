@@ -17,7 +17,10 @@ from personal_activity_mcp.common.pagination import (
     paginate,
     validate_limit,
 )
-from personal_activity_mcp.common.validation import normalize_source_refs
+from personal_activity_mcp.common.validation import (
+    normalize_optional_text,
+    normalize_source_refs,
+)
 
 __all__ = [
     "TargetRef",
@@ -29,6 +32,7 @@ __all__ = [
     "decode_cursor",
     "encode_cursor",
     "error_result",
+    "normalize_optional_text",
     "normalize_source_refs",
     "paginate",
     "validate_limit",

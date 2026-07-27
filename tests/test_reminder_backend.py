@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from personal_activity_mcp.reminders import MacOSReminderBackend
+from personal_activity_mcp.reminders import MacOSReminderBackend, ReminderBackendError
 from personal_activity_mcp.reminders import backend as reminder_backend
 
 OSASCRIPT = Path("/usr/bin/osascript")
@@ -95,3 +95,25 @@ def test_reminder_jxa_uses_local_formatter_for_due_dates() -> None:
     ):
         assert "formatLocalDate(" in script
         assert "toISOString().slice(0, 10)" not in script
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-json",
+        '{"reminder_id":"reminder-1"}',
+        reminder_payload(completed=False).replace(
+            '"is_completed":false',
+            '"is_completed":"false"',
+        ),
+        reminder_payload(completed=False).replace(
+            '"title":"Existing reminder"',
+            '"title":123',
+        ),
+    ],
+)
+def test_get_reminder_translates_malformed_payload_to_backend_error(payload: str) -> None:
+    backend = RecordingReminderBackend([payload])
+
+    with pytest.raises(ReminderBackendError, match="invalid payload"):
+        backend.get_reminder(reminder_id="reminder-1", list_id="Personal")

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
+import json
 import sqlite3
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from personal_activity_mcp.common import normalize_source_refs
 from personal_activity_mcp.sidecar.repository import SidecarRepository
@@ -26,17 +26,21 @@ class ReservationDecision(BaseModel):
 
 class McpItemWrite(BaseModel):
     item_id: str
-    item_type: Literal["calendar_event", "reminder", "action_record"]
+    item_type: Literal["calendar_event", "reminder"]
     external_id: str
     external_container_id: str
-    title_hash: str | None
-    time_start: str | None
-    time_end: str | None
-    status_semantics: str | None
-    state_token: str | None = None
+    status_semantics: Literal["planned", "probable", "confirmed"]
     created_by_mcp: bool
-    source_relation_type: Literal["created_from", "supported_by", "updated_from"]
-    calendar_completion_status: Literal["unknown", "incomplete", "completed"] | None = None
+    completion_status: Literal["unknown", "incomplete", "completed"] | None = None
+    expected_completion_status: Literal["unknown", "incomplete", "completed"] | None = None
+
+    @model_validator(mode="after")
+    def validate_completion_status(self) -> McpItemWrite:
+        if self.item_type == "reminder" and (
+            self.completion_status is not None or self.expected_completion_status is not None
+        ):
+            raise ValueError("completion status fields are only valid for calendar_event")
+        return self
 
 
 class AuditWrite(BaseModel):
@@ -63,6 +67,10 @@ class OperationResult(BaseModel):
     audit_error_code: str | None
 
 
+class SidecarStateConflict(sqlite3.IntegrityError):
+    """Raised when a local compare-and-set precondition no longer holds."""
+
+
 class WriteControl:
     def __init__(self, repository: SidecarRepository) -> None:
         self._repository = repository
@@ -73,13 +81,11 @@ class WriteControl:
         idempotency_key: str,
         operation: str,
         request_hash: str,
-        hash_version: int = 2,
+        confirmed_by_user: bool = False,
     ) -> ReservationDecision:
         _require_non_empty(idempotency_key, "idempotency_key")
         _require_non_empty(operation, "operation")
         _require_non_empty(request_hash, "request_hash")
-        if hash_version < 1:
-            raise ValueError("hash_version must be positive")
 
         with self._repository.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -95,21 +101,15 @@ class WriteControl:
                 connection.execute(
                     """
                     INSERT INTO idempotency_key (
-                        id,
-                        key,
-                        operation,
-                        request_hash,
-                        hash_version,
-                        status
+                        key, operation, request_hash, status, confirmed_by_user
                     )
-                    VALUES (?, ?, ?, ?, ?, 'pending')
+                    VALUES (?, ?, ?, 'pending', ?)
                     """,
                     (
-                        _idempotency_row_id(idempotency_key, operation),
                         idempotency_key,
                         operation,
                         request_hash,
-                        hash_version,
+                        1 if confirmed_by_user else 0,
                     ),
                 )
                 return ReservationDecision(status="execute")
@@ -135,13 +135,13 @@ class WriteControl:
                     """
                     UPDATE idempotency_key
                     SET status = 'pending',
-                        hash_version = ?,
                         result_item_id = NULL,
                         error_code = NULL,
+                        audit_id = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE key = ? AND operation = ?
                     """,
-                    (hash_version, idempotency_key, operation),
+                    (idempotency_key, operation),
                 )
                 return ReservationDecision(status="execute")
             raise sqlite3.DatabaseError(f"Unsupported idempotency status: {status}")
@@ -154,21 +154,45 @@ class WriteControl:
         request_hash: str,
         confirmed_by_user: bool,
     ) -> None:
-        """Record a rejected conflicting or concurrent request without changing its owner."""
+        """Record a conflicting or concurrent request without changing its owner."""
         error_code = {
             "conflict": "IDEMPOTENCY_CONFLICT",
             "in_progress": "OPERATION_IN_PROGRESS",
         }.get(decision.status)
         if error_code is None:
             return
-        self._repository.record_operation_audit(
+        self.record_blocked(
             operation=operation,
             target_item_id=decision.result_item_id,
+            request_hash=request_hash,
+            error_code=error_code,
+            confirmed_by_user=confirmed_by_user,
+        )
+
+    def record_blocked(
+        self,
+        *,
+        operation: str,
+        target_item_id: str | None,
+        request_hash: str,
+        error_code: str,
+        confirmed_by_user: bool,
+    ) -> str:
+        """Append one audit for a request rejected before reservation or execution."""
+        audit = AuditWrite(
             request_hash=request_hash,
             result_status="blocked",
             error_code=error_code,
             confirmed_by_user=confirmed_by_user,
         )
+        with self._repository.connect() as connection:
+            _insert_audit(
+                connection,
+                audit=audit,
+                operation=operation,
+                target_item_id=target_item_id,
+            )
+        return audit.audit_id
 
     def finalize_success(
         self,
@@ -178,8 +202,8 @@ class WriteControl:
         item: McpItemWrite,
         source_refs: list[str],
         audit: AuditWrite,
+        external_write_attempted: bool = True,
     ) -> None:
-        normalized_refs = normalize_source_refs(source_refs)
         try:
             with self._repository.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -189,6 +213,39 @@ class WriteControl:
                     operation=operation,
                     request_hash=audit.request_hash,
                 )
+                existing = connection.execute(
+                    """
+                    SELECT
+                        item_type,
+                        external_id,
+                        external_container_id,
+                        source_refs_json,
+                        completion_status
+                    FROM mcp_item
+                    WHERE id = ?
+                    """,
+                    (item.item_id,),
+                ).fetchone()
+                if existing is not None and (
+                    str(existing["item_type"]) != item.item_type
+                    or str(existing["external_id"]) != item.external_id
+                    or str(existing["external_container_id"]) != item.external_container_id
+                ):
+                    raise sqlite3.IntegrityError("mcp_item item identity cannot be reassigned")
+                current_completion_status = (
+                    str(existing["completion_status"])
+                    if existing is not None and existing["completion_status"] is not None
+                    else "unknown"
+                )
+                if (
+                    item.expected_completion_status is not None
+                    and current_completion_status != item.expected_completion_status
+                ):
+                    raise SidecarStateConflict(
+                        "calendar completion status changed before finalization"
+                    )
+                refs = _merge_source_refs(existing, source_refs)
+                completion_status = _resolved_completion_status(item, existing)
                 connection.execute(
                     """
                     INSERT INTO mcp_item (
@@ -196,87 +253,28 @@ class WriteControl:
                         item_type,
                         external_id,
                         external_container_id,
-                        title_hash,
-                        time_start,
-                        time_end,
                         status_semantics,
-                        state_token,
+                        completion_status,
+                        source_refs_json,
                         created_by_mcp
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
-                        item_type = excluded.item_type,
-                        external_id = excluded.external_id,
-                        external_container_id = excluded.external_container_id,
-                        title_hash = excluded.title_hash,
-                        time_start = excluded.time_start,
-                        time_end = excluded.time_end,
                         status_semantics = excluded.status_semantics,
-                        state_token = excluded.state_token,
-                        created_by_mcp = excluded.created_by_mcp,
-                        updated_at = CURRENT_TIMESTAMP
+                        completion_status = excluded.completion_status,
+                        source_refs_json = excluded.source_refs_json,
+                        created_by_mcp = excluded.created_by_mcp
                     """,
                     (
                         item.item_id,
                         item.item_type,
                         item.external_id,
                         item.external_container_id,
-                        item.title_hash,
-                        item.time_start,
-                        item.time_end,
                         item.status_semantics,
-                        item.state_token,
+                        completion_status,
+                        json.dumps(refs, separators=(",", ":")),
                         1 if item.created_by_mcp else 0,
                     ),
-                )
-                if item.calendar_completion_status is not None:
-                    if item.item_type != "calendar_event":
-                        raise ValueError(
-                            "calendar_completion_status requires a calendar_event item"
-                        )
-                    connection.execute(
-                        """
-                        INSERT INTO calendar_event_state (item_id, completion_status)
-                        VALUES (?, ?)
-                        ON CONFLICT(item_id) DO UPDATE SET
-                            completion_status = excluded.completion_status,
-                            updated_at = CURRENT_TIMESTAMP
-                        """,
-                        (item.item_id, item.calendar_completion_status),
-                    )
-                for source_ref in normalized_refs:
-                    connection.execute(
-                        """
-                        INSERT INTO source_link (
-                            id,
-                            target_item_id,
-                            source_ref,
-                            relation_type
-                        )
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(id) DO NOTHING
-                        """,
-                        (
-                            _source_link_id(
-                                item.item_id,
-                                source_ref,
-                                item.source_relation_type,
-                            ),
-                            item.item_id,
-                            source_ref,
-                            item.source_relation_type,
-                        ),
-                    )
-                connection.execute(
-                    """
-                    UPDATE idempotency_key
-                    SET status = 'succeeded',
-                        result_item_id = ?,
-                        error_code = NULL,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE key = ? AND operation = ?
-                    """,
-                    (item.item_id, idempotency_key, operation),
                 )
                 _insert_audit(
                     connection,
@@ -284,11 +282,37 @@ class WriteControl:
                     operation=operation,
                     target_item_id=item.item_id,
                 )
+                update = connection.execute(
+                    """
+                    UPDATE idempotency_key
+                    SET status = 'succeeded',
+                        result_item_id = ?,
+                        error_code = NULL,
+                        audit_id = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE key = ? AND operation = ?
+                    """,
+                    (item.item_id, audit.audit_id, idempotency_key, operation),
+                )
+                if update.rowcount != 1:
+                    raise sqlite3.DatabaseError("idempotency finalization did not update one row")
+        except SidecarStateConflict:
+            raise
         except Exception:
-            self._mark_external_state_unknown(
+            status: Literal["failed", "external_state_unknown"] = (
+                "external_state_unknown" if external_write_attempted else "failed"
+            )
+            error_code = (
+                "EXTERNAL_STATE_UNKNOWN"
+                if external_write_attempted
+                else "LOCAL_PERSISTENCE_FAILURE"
+            )
+            self._mark_finalization_failure(
                 idempotency_key=idempotency_key,
                 operation=operation,
                 audit=audit,
+                status=status,
+                error_code=error_code,
             )
             raise
 
@@ -301,6 +325,12 @@ class WriteControl:
         error_code: str,
         audit: AuditWrite,
     ) -> None:
+        terminal_audit = audit.model_copy(
+            update={
+                "result_status": status,
+                "error_code": error_code,
+            }
+        )
         with self._repository.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             _require_pending_reservation(
@@ -309,27 +339,29 @@ class WriteControl:
                 operation=operation,
                 request_hash=audit.request_hash,
             )
+            _insert_audit(
+                connection,
+                audit=terminal_audit,
+                operation=operation,
+                target_item_id=None,
+            )
             connection.execute(
                 """
                 UPDATE idempotency_key
                 SET status = ?,
                     result_item_id = NULL,
                     error_code = ?,
+                    audit_id = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE key = ? AND operation = ?
                 """,
-                (status, error_code, idempotency_key, operation),
-            )
-            _insert_audit(
-                connection,
-                audit=audit.model_copy(
-                    update={
-                        "result_status": status,
-                        "error_code": error_code,
-                    }
+                (
+                    status,
+                    error_code,
+                    terminal_audit.audit_id,
+                    idempotency_key,
+                    operation,
                 ),
-                operation=operation,
-                target_item_id=None,
             )
 
     def get_operation_result(
@@ -338,86 +370,92 @@ class WriteControl:
         idempotency_key: str,
         operation: str,
     ) -> OperationResult | None:
-        """Read one local write result and its latest matching audit without side effects."""
+        """Read one local write result and its directly linked terminal audit."""
         _require_non_empty(idempotency_key, "idempotency_key")
         _require_non_empty(operation, "operation")
         with self._repository.connect() as connection:
             row = connection.execute(
                 """
-                SELECT request_hash, status, result_item_id, error_code
-                FROM idempotency_key
-                WHERE key = ? AND operation = ?
+                SELECT
+                    i.request_hash,
+                    i.status,
+                    i.result_item_id,
+                    i.error_code,
+                    i.audit_id,
+                    a.result_status AS audit_result_status,
+                    a.target_item_id AS audit_target_item_id,
+                    a.error_code AS audit_error_code
+                FROM idempotency_key AS i
+                LEFT JOIN operation_audit AS a ON a.id = i.audit_id
+                WHERE i.key = ? AND i.operation = ?
                 """,
                 (idempotency_key, operation),
             ).fetchone()
-            if row is None:
-                return None
-            audit = connection.execute(
-                """
-                SELECT id, result_status, target_item_id, error_code
-                FROM operation_audit
-                WHERE operation = ?
-                  AND request_hash = ?
-                  AND result_status = ?
-                  AND target_item_id IS ?
-                  AND error_code IS ?
-                ORDER BY rowid DESC
-                LIMIT 1
-                """,
-                (
-                    operation,
-                    row["request_hash"],
-                    row["status"],
-                    row["result_item_id"],
-                    row["error_code"],
-                ),
-            ).fetchone()
+        if row is None:
+            return None
         return OperationResult(
             status=str(row["status"]),
             request_hash=str(row["request_hash"]),
             result_item_id=_optional_string(row["result_item_id"]),
             error_code=_optional_string(row["error_code"]),
-            audit_id=str(audit["id"]) if audit is not None else None,
-            audit_result_status=(str(audit["result_status"]) if audit is not None else None),
-            audit_target_item_id=(
-                _optional_string(audit["target_item_id"]) if audit is not None else None
-            ),
-            audit_error_code=(_optional_string(audit["error_code"]) if audit is not None else None),
+            audit_id=_optional_string(row["audit_id"]),
+            audit_result_status=_optional_string(row["audit_result_status"]),
+            audit_target_item_id=_optional_string(row["audit_target_item_id"]),
+            audit_error_code=_optional_string(row["audit_error_code"]),
         )
 
-    def _mark_external_state_unknown(
+    def _mark_finalization_failure(
         self,
         *,
         idempotency_key: str,
         operation: str,
         audit: AuditWrite,
+        status: Literal["failed", "external_state_unknown"],
+        error_code: str,
     ) -> None:
+        terminal_audit = audit.model_copy(
+            update={
+                "audit_id": f"audit:{uuid.uuid4().hex}",
+                "result_status": status,
+                "error_code": error_code,
+            }
+        )
         try:
             with self._repository.connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                update = connection.execute(
+                row = connection.execute(
                     """
-                    UPDATE idempotency_key
-                    SET status = 'external_state_unknown',
-                        result_item_id = NULL,
-                        error_code = 'EXTERNAL_STATE_UNKNOWN',
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE key = ? AND operation = ? AND status = 'pending'
+                    SELECT status
+                    FROM idempotency_key
+                    WHERE key = ? AND operation = ?
                     """,
                     (idempotency_key, operation),
-                )
-                if update.rowcount != 1:
+                ).fetchone()
+                if row is None or str(row["status"]) != "pending":
                     return
                 _insert_audit(
                     connection,
-                    audit=audit.model_copy(
-                        update={
-                            "result_status": "external_state_unknown",
-                            "error_code": "EXTERNAL_STATE_UNKNOWN",
-                        }
-                    ),
+                    audit=terminal_audit,
                     operation=operation,
                     target_item_id=None,
+                )
+                connection.execute(
+                    """
+                    UPDATE idempotency_key
+                    SET status = ?,
+                        result_item_id = NULL,
+                        error_code = ?,
+                        audit_id = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE key = ? AND operation = ?
+                    """,
+                    (
+                        status,
+                        error_code,
+                        terminal_audit.audit_id,
+                        idempotency_key,
+                        operation,
+                    ),
                 )
         except Exception:
             return
@@ -478,14 +516,33 @@ def _insert_audit(
     )
 
 
-def _idempotency_row_id(idempotency_key: str, operation: str) -> str:
-    digest = hashlib.sha256(f"{operation}\0{idempotency_key}".encode()).hexdigest()
-    return f"idempotency:{digest[:32]}"
+def _merge_source_refs(
+    existing: sqlite3.Row | None,
+    source_refs: list[str],
+) -> list[str]:
+    previous: list[str] = []
+    if existing is not None:
+        raw_previous = json.loads(str(existing["source_refs_json"]))
+        if not isinstance(raw_previous, list) or not all(
+            isinstance(value, str) for value in raw_previous
+        ):
+            raise sqlite3.DatabaseError("mcp_item.source_refs_json must be a string array")
+        previous = raw_previous
+    normalized_new = normalize_source_refs(source_refs)
+    return sorted(set(previous).union(normalized_new))
 
 
-def _source_link_id(item_id: str, source_ref: str, relation_type: str) -> str:
-    digest = hashlib.sha256(f"{item_id}\0{source_ref}\0{relation_type}".encode()).hexdigest()
-    return f"source:{digest[:32]}"
+def _resolved_completion_status(
+    item: McpItemWrite,
+    existing: sqlite3.Row | None,
+) -> str | None:
+    if item.item_type == "reminder":
+        return None
+    if item.completion_status is not None:
+        return item.completion_status
+    if existing is not None and existing["completion_status"] is not None:
+        return str(existing["completion_status"])
+    return "unknown"
 
 
 def _require_non_empty(value: str, field_name: str) -> None:

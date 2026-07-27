@@ -1,236 +1,332 @@
+import json
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
 
-from personal_activity_mcp.config import CalendarSource, ReminderSource
 from personal_activity_mcp.sidecar import SidecarRepository
 
 
 def table_names(database_path: Path) -> set[str]:
-    repository = SidecarRepository(database_path)
-    with repository.connect() as connection:
+    with sqlite3.connect(database_path) as connection:
         rows = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-    return {row["name"] for row in rows}
+    return {str(row[0]) for row in rows}
 
 
-def test_initialize_creates_only_current_required_tables(tmp_path: Path) -> None:
-    database_path = tmp_path / "nested" / "personal_activity.sqlite3"
+def column_names(database_path: Path, table_name: str) -> set[str]:
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {str(row[1]) for row in rows}
 
-    repository = SidecarRepository(database_path)
-    repository.initialize()
+
+def insert_item(
+    repository: SidecarRepository,
+    *,
+    item_id: str,
+    item_type: str,
+    external_id: str,
+    completion_status: str | None,
+    source_refs: list[str],
+    created_by_mcp: bool,
+) -> None:
+    with repository.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO mcp_item (
+                id,
+                item_type,
+                external_id,
+                external_container_id,
+                status_semantics,
+                completion_status,
+                source_refs_json,
+                created_by_mcp
+            )
+            VALUES (?, ?, ?, 'Personal', 'planned', ?, ?, ?)
+            """,
+            (
+                item_id,
+                item_type,
+                external_id,
+                completion_status,
+                json.dumps(source_refs),
+                1 if created_by_mcp else 0,
+            ),
+        )
+
+
+def test_initialize_creates_only_clean_schema_with_private_filesystem_modes(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "secure-sidecar" / "state.sqlite3"
+
+    SidecarRepository(database_path).initialize()
 
     assert table_names(database_path) == {
-        "calendar_event_state",
-        "source",
-        "mcp_item",
         "idempotency_key",
-        "source_link",
+        "mcp_item",
         "operation_audit",
-        "schema_version",
     }
+    assert column_names(database_path, "mcp_item") == {
+        "id",
+        "item_type",
+        "external_id",
+        "external_container_id",
+        "status_semantics",
+        "completion_status",
+        "source_refs_json",
+        "created_by_mcp",
+    }
+    assert column_names(database_path, "idempotency_key") == {
+        "key",
+        "operation",
+        "request_hash",
+        "result_item_id",
+        "status",
+        "error_code",
+        "audit_id",
+        "confirmed_by_user",
+        "created_at",
+        "updated_at",
+    }
+    assert column_names(database_path, "operation_audit") == {
+        "id",
+        "operation",
+        "target_item_id",
+        "request_hash",
+        "result_status",
+        "error_code",
+        "confirmed_by_user",
+        "created_at",
+    }
+    assert stat.S_IMODE(database_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(database_path.stat().st_mode) == 0o600
 
 
-def test_source_table_rejects_removed_local_file_source_type(tmp_path: Path) -> None:
-    repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
+def test_initialize_rejects_insecure_existing_parent_without_changing_mode(
+    tmp_path: Path,
+) -> None:
+    database_parent = tmp_path / "shared"
+    database_parent.mkdir(mode=0o755)
+    database_parent.chmod(0o755)
+    database_path = database_parent / "state.sqlite3"
+
+    with pytest.raises(PermissionError, match="must not be accessible"):
+        SidecarRepository(database_path).initialize()
+
+    assert stat.S_IMODE(database_parent.stat().st_mode) == 0o755
+
+
+def test_initialize_rejects_an_old_schema_instead_of_migrating_it(tmp_path: Path) -> None:
+    database_path = tmp_path / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        connection.execute("INSERT INTO schema_version (version) VALUES (3)")
+
+    with pytest.raises(sqlite3.DatabaseError, match="Incompatible sidecar schema"):
+        SidecarRepository(database_path).initialize()
+
+    assert table_names(database_path) == {"schema_version"}
+    assert list(tmp_path.glob("*.pre-v*.sqlite3")) == []
+
+
+def test_initialize_rejects_same_table_names_with_wrong_schema_without_mutation(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE mcp_item (id TEXT PRIMARY KEY)")
+        connection.execute("CREATE TABLE operation_audit (id TEXT PRIMARY KEY)")
+        connection.execute(
+            """
+            CREATE TABLE idempotency_key (
+                status TEXT,
+                audit_id TEXT,
+                error_code TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+    database_path.chmod(0o640)
+    original_bytes = database_path.read_bytes()
+
+    with pytest.raises(sqlite3.DatabaseError, match="Incompatible sidecar schema"):
+        SidecarRepository(database_path).initialize()
+
+    assert database_path.read_bytes() == original_bytes
+    assert stat.S_IMODE(database_path.stat().st_mode) == 0o640
+
+
+def test_initialize_rejects_matching_columns_without_required_constraints(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "state.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE mcp_item (
+                id TEXT,
+                item_type TEXT,
+                external_id TEXT,
+                external_container_id TEXT,
+                status_semantics TEXT,
+                completion_status TEXT,
+                source_refs_json TEXT,
+                created_by_mcp INTEGER
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE operation_audit (
+                id TEXT,
+                operation TEXT,
+                target_item_id TEXT,
+                request_hash TEXT,
+                result_status TEXT,
+                error_code TEXT,
+                confirmed_by_user INTEGER,
+                created_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE idempotency_key (
+                key TEXT,
+                operation TEXT,
+                request_hash TEXT,
+                result_item_id TEXT,
+                status TEXT,
+                error_code TEXT,
+                audit_id TEXT,
+                confirmed_by_user INTEGER,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        connection.execute("PRAGMA application_id = 0x50414D43")
+        connection.execute("PRAGMA user_version = 1")
+    database_path.chmod(0o640)
+    original_bytes = database_path.read_bytes()
+
+    with pytest.raises(sqlite3.DatabaseError, match="Incompatible sidecar schema"):
+        SidecarRepository(database_path).initialize()
+
+    assert database_path.read_bytes() == original_bytes
+    assert stat.S_IMODE(database_path.stat().st_mode) == 0o640
+
+
+def test_initialize_marks_only_abandoned_pending_operations_unknown(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "state.sqlite3"
+    repository = SidecarRepository(database_path)
+    repository.initialize()
+    with repository.connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO idempotency_key (
+                key, operation, request_hash, status
+            )
+            VALUES (?, 'calendar.create_event', ?, ?)
+            """,
+            [
+                ("pending-key", "hash-1", "pending"),
+                ("failed-key", "hash-2", "failed"),
+                ("succeeded-key", "hash-3", "succeeded"),
+            ],
+        )
+
+    SidecarRepository(database_path).initialize()
+
+    with repository.connect() as connection:
+        rows = connection.execute(
+            "SELECT key, status, error_code FROM idempotency_key ORDER BY key"
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("failed-key", "failed", None),
+        ("pending-key", "external_state_unknown", "EXTERNAL_STATE_UNKNOWN"),
+        ("succeeded-key", "succeeded", None),
+    ]
+    with repository.connect() as connection:
+        recovered = connection.execute(
+            """
+            SELECT
+                a.operation,
+                a.request_hash,
+                a.result_status,
+                a.error_code,
+                a.confirmed_by_user,
+                i.audit_id
+            FROM idempotency_key AS i
+            JOIN operation_audit AS a ON a.id = i.audit_id
+            WHERE i.key = 'pending-key'
+            """
+        ).fetchone()
+    assert tuple(recovered) == (
+        "calendar.create_event",
+        "hash-1",
+        "external_state_unknown",
+        "EXTERNAL_STATE_UNKNOWN",
+        0,
+        recovered["audit_id"],
+    )
+
+
+def test_clean_schema_rejects_removed_action_record_type(tmp_path: Path) -> None:
+    repository = SidecarRepository(tmp_path / "state.sqlite3")
     repository.initialize()
 
     with pytest.raises(sqlite3.IntegrityError), repository.connect() as connection:
         connection.execute(
             """
-                INSERT INTO source (id, source_type, source_name, source_uri, config_key)
-                VALUES ('local:daily', 'local_file', 'Daily', 'file:///tmp/daily', 'daily')
-                """
+            INSERT INTO mcp_item (
+                id,
+                item_type,
+                external_id,
+                external_container_id,
+                status_semantics,
+                completion_status,
+                source_refs_json,
+                created_by_mcp
+            )
+            VALUES (
+                'legacy:1',
+                'action_record',
+                'event-1',
+                'Personal',
+                'planned',
+                'unknown',
+                '[]',
+                1
+            )
+            """
         )
 
 
-def test_upsert_calendar_source_stores_allowlisted_calendar_metadata(
-    tmp_path: Path,
-) -> None:
+def test_lists_external_item_contexts_from_compact_item_rows(tmp_path: Path) -> None:
     repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
     repository.initialize()
-
-    source_id = repository.upsert_calendar_source(
-        CalendarSource(calendar_id="Personal", title="Personal", allow_write=True)
-    )
-
-    with repository.connect() as connection:
-        row = connection.execute(
-            "SELECT * FROM source WHERE id = ?",
-            (source_id,),
-        ).fetchone()
-    assert row["id"] == "calendar:Personal"
-    assert row["source_type"] == "calendar"
-    assert row["source_name"] == "Personal"
-    assert row["source_uri"] == "calendar://Personal"
-    assert row["config_key"] == "Personal"
-
-
-def test_upsert_reminder_source_stores_allowlisted_list_metadata(
-    tmp_path: Path,
-) -> None:
-    repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
-    repository.initialize()
-
-    source_id = repository.upsert_reminder_source(
-        ReminderSource(list_id="Personal", title="Personal", allow_write=True)
-    )
-
-    with repository.connect() as connection:
-        row = connection.execute(
-            "SELECT * FROM source WHERE id = ?",
-            (source_id,),
-        ).fetchone()
-    assert row["id"] == "reminder:Personal"
-    assert row["source_type"] == "reminder"
-    assert row["source_name"] == "Personal"
-    assert row["source_uri"] == "reminder://Personal"
-    assert row["config_key"] == "Personal"
-
-
-def test_idempotency_detects_new_deduplicated_and_conflict(
-    tmp_path: Path,
-) -> None:
-    repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
-    repository.initialize()
-    repository.upsert_mcp_item(
+    insert_item(
+        repository,
         item_id="calendar:event-1",
         item_type="calendar_event",
         external_id="event-1",
-        external_container_id="calendar-1",
-        title_hash="title-hash",
-        time_start="2026-07-08T10:00:00+08:00",
-        time_end="2026-07-08T11:00:00+08:00",
-        status_semantics="scheduled",
+        completion_status="completed",
+        source_refs=["file:daily/2026-07-26.md"],
         created_by_mcp=True,
     )
-
-    initial = repository.check_idempotency_key(
-        key="calendar:create:demo",
-        operation="calendar.create_event",
-        request_hash="request-hash-1",
-    )
-    repository.record_idempotency_success(
-        key="calendar:create:demo",
-        operation="calendar.create_event",
-        request_hash="request-hash-1",
-        result_item_id="calendar:event-1",
-    )
-    repeated = repository.check_idempotency_key(
-        key="calendar:create:demo",
-        operation="calendar.create_event",
-        request_hash="request-hash-1",
-    )
-    conflict = repository.check_idempotency_key(
-        key="calendar:create:demo",
-        operation="calendar.create_event",
-        request_hash="request-hash-2",
-    )
-    other_operation = repository.check_idempotency_key(
-        key="calendar:create:demo",
-        operation="calendar.update_event",
-        request_hash="request-hash-3",
-    )
-    repository.record_idempotency_success(
-        key="calendar:create:demo",
-        operation="calendar.update_event",
-        request_hash="request-hash-3",
-        result_item_id="calendar:event-1",
-    )
-
-    assert initial.decision == "new"
-    assert initial.result_item_id is None
-    assert repeated.decision == "deduplicated"
-    assert repeated.result_item_id == "calendar:event-1"
-    assert conflict.decision == "conflict"
-    assert conflict.result_item_id == "calendar:event-1"
-    assert other_operation.decision == "new"
-    with repository.connect() as connection:
-        row_count = connection.execute(
-            "SELECT COUNT(*) FROM idempotency_key WHERE key = ?",
-            ("calendar:create:demo",),
-        ).fetchone()[0]
-    assert row_count == 2
-
-
-def test_records_opaque_source_reference_and_operation_audit(tmp_path: Path) -> None:
-    repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
-    repository.initialize()
-    repository.upsert_mcp_item(
-        item_id="calendar:event-1",
-        item_type="calendar_event",
-        external_id="event-1",
-        external_container_id="calendar-1",
-        title_hash="title-hash",
-        time_start="2026-07-08T10:00:00+08:00",
-        time_end="2026-07-08T11:00:00+08:00",
-        status_semantics="scheduled",
-        created_by_mcp=True,
-    )
-
-    source_link_id = repository.record_source_link(
-        target_item_id="calendar:event-1",
-        source_ref="file:daily/2026-07-26.md",
-        relation_type="created_from",
-    )
-    audit_id = repository.record_operation_audit(
-        operation="calendar.create_event",
-        target_item_id="calendar:event-1",
-        request_hash="request-hash-1",
-        result_status="succeeded",
-        error_code=None,
-        confirmed_by_user=True,
-    )
-
-    with repository.connect() as connection:
-        source_link = connection.execute("SELECT * FROM source_link").fetchone()
-        audit = connection.execute("SELECT * FROM operation_audit").fetchone()
-
-    assert source_link["id"] == source_link_id
-    assert source_link["target_item_id"] == "calendar:event-1"
-    assert source_link["source_ref"] == "file:daily/2026-07-26.md"
-    assert source_link["relation_type"] == "created_from"
-    assert audit["id"] == audit_id
-    assert audit["operation"] == "calendar.create_event"
-    assert audit["target_item_id"] == "calendar:event-1"
-    assert audit["request_hash"] == "request-hash-1"
-    assert audit["result_status"] == "succeeded"
-    assert audit["confirmed_by_user"] == 1
-
-
-def test_lists_external_item_contexts_in_one_batch(tmp_path: Path) -> None:
-    repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
-    repository.initialize()
-    repository.upsert_mcp_item(
-        item_id="calendar:event-1",
-        item_type="calendar_event",
-        external_id="event-1",
-        external_container_id="Personal",
-        title_hash="calendar-title",
-        time_start="2026-07-08T10:00:00+08:00",
-        time_end="2026-07-08T11:00:00+08:00",
-        status_semantics="planned",
-        created_by_mcp=True,
-    )
-    repository.upsert_mcp_item(
+    insert_item(
+        repository,
         item_id="reminder:reminder-1",
         item_type="reminder",
         external_id="reminder-1",
-        external_container_id="Personal",
-        title_hash="reminder-title",
-        time_start=None,
-        time_end=None,
-        status_semantics="planned",
+        completion_status=None,
+        source_refs=[],
         created_by_mcp=False,
-    )
-    repository.record_source_link(
-        target_item_id="calendar:event-1",
-        source_ref="file:daily/2026-07-26.md",
-        relation_type="created_from",
-    )
-    repository.set_calendar_completion_status(
-        item_id="calendar:event-1",
-        completion_status="completed",
     )
 
     contexts = repository.list_external_item_contexts(
@@ -251,3 +347,39 @@ def test_lists_external_item_contexts_in_one_batch(tmp_path: Path) -> None:
     assert reminder.source_refs == ()
     assert reminder.completion_status == "unknown"
     assert len(contexts) == 2
+
+
+def test_lists_external_item_contexts_in_bounded_query_chunks(tmp_path: Path) -> None:
+    repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    repository.initialize()
+    targets = [(f"event-{index}", "Personal") for index in range(1_200)]
+    with repository.connect() as connection:
+        connection.executemany(
+            """
+            INSERT INTO mcp_item (
+                id,
+                item_type,
+                external_id,
+                external_container_id,
+                status_semantics,
+                completion_status,
+                source_refs_json,
+                created_by_mcp
+            )
+            VALUES (?, 'calendar_event', ?, ?, 'planned', 'unknown', '[]', 0)
+            """,
+            [
+                (f"calendar:{external_id}", external_id, container_id)
+                for external_id, container_id in targets
+            ],
+        )
+
+    contexts = repository.list_external_item_contexts(
+        item_types=("calendar_event",),
+        targets=targets,
+    )
+
+    assert len(contexts) == 1_200
+    assert contexts[("calendar_event", "event-1199", "Personal")].item["id"] == (
+        "calendar:event-1199"
+    )

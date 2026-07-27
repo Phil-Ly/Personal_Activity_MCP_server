@@ -23,3 +23,8 @@ def require_aware_datetime(value: datetime, field_name: str) -> None:
     """Reject datetimes whose offset cannot be determined."""
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must include timezone information")
+
+
+def normalize_external_datetime(value: datetime) -> datetime:
+    """Match AppleScript's millisecond precision before hashing or writing."""
+    return value.replace(microsecond=(value.microsecond // 1_000) * 1_000)

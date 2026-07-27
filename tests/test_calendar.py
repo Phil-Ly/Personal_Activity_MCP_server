@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from personal_activity_mcp.calendar import (
     CalendarRepository,
     DescriptionUpdate,
 )
+from personal_activity_mcp.calendar import repository as calendar_repository
 from personal_activity_mcp.common import TargetRef, ToolContractError
 from personal_activity_mcp.config import AppConfig, CalendarSource
 from personal_activity_mcp.sidecar import SidecarRepository
@@ -179,6 +181,43 @@ def make_config(tmp_path: Path) -> AppConfig:
         ),
         default_timezone="Asia/Shanghai",
     )
+
+
+def insert_calendar_item(
+    sidecar: SidecarRepository,
+    *,
+    completion_status: str = "unknown",
+    source_refs: list[str] | None = None,
+) -> None:
+    with sidecar.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO mcp_item (
+                id,
+                item_type,
+                external_id,
+                external_container_id,
+                status_semantics,
+                completion_status,
+                source_refs_json,
+                created_by_mcp
+            )
+            VALUES (
+                'calendar_event:stable-1',
+                'calendar_event',
+                'event-1',
+                'Personal',
+                'planned',
+                ?,
+                ?,
+                1
+            )
+            """,
+            (
+                completion_status,
+                json.dumps(source_refs or []),
+            ),
+        )
 
 
 def test_list_events_queries_only_allowed_calendars_without_notes_by_default(
@@ -459,21 +498,9 @@ def test_list_events_uses_current_time_semantics_for_mcp_created_events(
 ) -> None:
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
     sidecar.initialize()
-    sidecar.upsert_mcp_item(
-        item_id="calendar_event:stable-1",
-        item_type="calendar_event",
-        external_id="event-1",
-        external_container_id="Personal",
-        title_hash="title-hash",
-        time_start="2026-07-08T10:00:00+00:00",
-        time_end="2026-07-08T11:00:00+00:00",
-        status_semantics="planned",
-        created_by_mcp=True,
-    )
-    sidecar.record_source_link(
-        target_item_id="calendar_event:stable-1",
-        source_ref="file:daily/2026-07-26.md",
-        relation_type="created_from",
+    insert_calendar_item(
+        sidecar,
+        source_refs=["file:daily/2026-07-26.md"],
     )
     event = CalendarEventRecord(
         event_id="event-1",
@@ -507,19 +534,8 @@ def test_list_events_merges_completion_without_overriding_time_semantics(
 ) -> None:
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
     sidecar.initialize()
-    sidecar.upsert_mcp_item(
-        item_id="calendar_event:stable-1",
-        item_type="calendar_event",
-        external_id="event-1",
-        external_container_id="Personal",
-        title_hash="title-hash",
-        time_start="2026-07-08T09:00:00+00:00",
-        time_end="2026-07-08T10:00:00+00:00",
-        status_semantics="planned",
-        created_by_mcp=True,
-    )
-    sidecar.set_calendar_completion_status(
-        item_id="calendar_event:stable-1",
+    insert_calendar_item(
+        sidecar,
         completion_status="completed",
     )
     event = CalendarEventRecord(
@@ -595,27 +611,97 @@ def test_create_event_writes_calendar_once_and_records_sidecar_metadata(
     with sidecar.connect() as connection:
         item = connection.execute("SELECT * FROM mcp_item").fetchone()
         idempotency = connection.execute("SELECT * FROM idempotency_key").fetchone()
-        source_links = connection.execute(
-            "SELECT * FROM source_link ORDER BY source_ref"
-        ).fetchall()
         audit = connection.execute("SELECT * FROM operation_audit").fetchone()
     assert item["id"] == created.stable_id
     assert item["item_type"] == "calendar_event"
     assert item["external_id"] == "created-event-1"
     assert item["external_container_id"] == "Personal"
-    assert item["title_hash"] is not None
+    assert json.loads(item["source_refs_json"]) == ["file:a", "file:b"]
     assert "MCP demo" not in " ".join(str(value) for value in item)
     assert idempotency["key"] == "calendar:create:demo"
     assert idempotency["result_item_id"] == created.stable_id
-    assert [row["target_item_id"] for row in source_links] == [
-        created.stable_id,
-        created.stable_id,
-    ]
-    assert [row["source_ref"] for row in source_links] == ["file:a", "file:b"]
+    assert idempotency["audit_id"] == audit["id"]
     assert audit["operation"] == "calendar.create_event"
     assert audit["target_item_id"] == created.stable_id
     assert audit["result_status"] == "succeeded"
     assert audit["confirmed_by_user"] == 0
+
+
+def test_calendar_stable_id_depends_on_external_identity_not_idempotency_key(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    repository = CalendarRepository(
+        make_config(tmp_path),
+        FakeCalendarBackend(),
+        sidecar,
+    )
+    created = repository.create_event(
+        calendar_id="Personal",
+        title="Created event",
+        start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+        is_all_day=False,
+        notes=None,
+        location=None,
+        timezone="Asia/Shanghai",
+        source_refs=[],
+        idempotency_key="Personal:event-2",
+    )
+
+    updated = repository.update_event(
+        target_ref=TargetRef(
+            resource_type="calendar_event",
+            item_id="event-2",
+            container_id="Personal",
+        ),
+        description=None,
+        completion_status="completed",
+        expected_state_token=None,
+        source_refs=[],
+        confirmed_by_user=True,
+        idempotency_key="calendar:update:event-2",
+    )
+
+    assert created.stable_id != updated.stable_id
+    with sidecar.connect() as connection:
+        identities = connection.execute(
+            """
+            SELECT external_id, external_container_id
+            FROM mcp_item
+            ORDER BY external_id
+            """
+        ).fetchall()
+    assert [tuple(row) for row in identities] == [
+        ("created-event-1", "Personal"),
+        ("event-2", "Personal"),
+    ]
+
+
+def test_create_event_normalizes_submillisecond_precision_before_write(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeCalendarBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+
+    repository.create_event(
+        calendar_id="Personal",
+        title="Precise event",
+        start=datetime(2026, 7, 8, 10, 0, 0, 123456, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 11, 0, 0, 654321, tzinfo=UTC),
+        is_all_day=False,
+        notes=None,
+        location=None,
+        timezone="Asia/Shanghai",
+        source_refs=[],
+        idempotency_key="calendar:create:precision",
+    )
+
+    assert backend.create_calls[0]["start"].microsecond == 123000
+    assert backend.create_calls[0]["end"].microsecond == 654000
 
 
 @pytest.mark.parametrize(
@@ -708,6 +794,83 @@ def test_create_event_marks_unverifiable_backend_result_unknown(
     assert tuple(state) == ("external_state_unknown", "EXTERNAL_STATE_UNKNOWN")
 
 
+def test_create_event_requires_exact_post_create_reread(
+    tmp_path: Path,
+) -> None:
+    class MutatedAfterCreateBackend(FakeCalendarBackend):
+        def create_event(self, **kwargs) -> CalendarEventRecord:
+            record = super().create_event(**kwargs)
+            self.events[-1] = record.model_copy(update={"title": "Unexpected title"})
+            return record
+
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = MutatedAfterCreateBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+
+    with pytest.raises(ToolContractError) as captured:
+        repository.create_event(
+            calendar_id="Personal",
+            title="Expected title",
+            start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+            end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+            is_all_day=False,
+            notes="Expected notes",
+            location="Room 1",
+            timezone="Asia/Shanghai",
+            source_refs=[],
+            idempotency_key="calendar:create:reread",
+        )
+
+    assert captured.value.code == "EXTERNAL_STATE_UNKNOWN"
+    assert backend.get_calls == [{"event_id": "created-event-1", "calendar_id": "Personal"}]
+
+
+def test_create_event_normalizes_empty_optional_text_before_hash_and_write(
+    tmp_path: Path,
+) -> None:
+    class AppleNormalizingBackend(FakeCalendarBackend):
+        def create_event(self, **kwargs) -> CalendarEventRecord:
+            record = super().create_event(**kwargs)
+            normalized = record.model_copy(update={"notes": None, "location": None})
+            self.events[-1] = normalized
+            return normalized
+
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = AppleNormalizingBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+
+    result = repository.create_event(
+        calendar_id="Personal",
+        title="Empty optional fields",
+        start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+        is_all_day=False,
+        notes="",
+        location="",
+        timezone="Asia/Shanghai",
+        source_refs=[],
+        idempotency_key="calendar:create:empty-text",
+    )
+
+    assert result.created is True
+    assert backend.create_calls[0]["notes"] is None
+    assert backend.create_calls[0]["location"] is None
+
+
+def test_calendar_identity_hashing_is_unambiguous_when_ids_contain_colons() -> None:
+    first = ("a:b", "c")
+    second = ("a", "b:c")
+
+    assert calendar_repository._calendar_evidence_id(*first) != (
+        calendar_repository._calendar_evidence_id(*second)
+    )
+    assert calendar_repository._stable_calendar_item_id(*first) != (
+        calendar_repository._stable_calendar_item_id(*second)
+    )
+
+
 def test_create_event_does_not_retry_after_uncertain_backend_result(
     tmp_path: Path,
 ) -> None:
@@ -767,7 +930,7 @@ def test_create_event_can_retry_when_backend_confirms_no_external_change(
                     "osascript could not start",
                     external_state_changed=False,
                 )
-            return CalendarEventRecord(
+            record = CalendarEventRecord(
                 event_id="created-event-1",
                 calendar_id=str(kwargs["calendar_id"]),
                 title=str(kwargs["title"]),
@@ -777,6 +940,8 @@ def test_create_event_can_retry_when_backend_confirms_no_external_change(
                 notes=kwargs["notes"],
                 location=kwargs["location"],
             )
+            self.events.append(record)
+            return record
 
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
     sidecar.initialize()
@@ -956,6 +1121,7 @@ def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -
     assert updated.audit_id.startswith("audit:")
     assert repeated.updated is False
     assert repeated.deduplicated is True
+    assert repeated.audit_id == updated.audit_id
     assert repeated.stable_id == updated.stable_id
     assert updated.source_refs == ["file:a", "file:b"]
     assert repeated.source_refs == ["file:a", "file:b"]
@@ -966,16 +1132,93 @@ def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -
         audit = connection.execute(
             "SELECT * FROM operation_audit WHERE operation = 'calendar.update_event'"
         ).fetchone()
-        completion = connection.execute(
-            "SELECT completion_status FROM calendar_event_state WHERE item_id = ?",
-            (updated.stable_id,),
-        ).fetchone()
     assert item["item_type"] == "calendar_event"
     assert item["external_id"] == "event-1"
     assert item["status_semantics"] == "probable"
     assert audit["target_item_id"] == updated.stable_id
     assert audit["confirmed_by_user"] == 1
-    assert completion["completion_status"] == "completed"
+    assert item["completion_status"] == "completed"
+    assert json.loads(item["source_refs_json"]) == ["file:a", "file:b"]
+
+
+def test_calendar_state_token_changes_with_local_completion_status(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    event = CalendarEventRecord(
+        event_id="event-1",
+        calendar_id="Personal",
+        title="Existing event",
+        start=datetime(2026, 7, 8, 10, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 11, tzinfo=UTC),
+        is_all_day=False,
+    )
+    backend = FakeCalendarBackend([event])
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+    before = repository.list_events(
+        calendar_ids=["Personal"],
+        start=datetime(2026, 7, 8, 9, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 12, tzinfo=UTC),
+    ).events[0]
+
+    repository.update_event(
+        target_ref=before.target_ref,
+        description=None,
+        completion_status="completed",
+        expected_state_token=before.state_token,
+        source_refs=[],
+        confirmed_by_user=True,
+        idempotency_key="calendar:update:completion-token",
+    )
+    after = repository.list_events(
+        calendar_ids=["Personal"],
+        start=datetime(2026, 7, 8, 9, tzinfo=UTC),
+        end=datetime(2026, 7, 8, 12, tzinfo=UTC),
+    ).events[0]
+
+    assert before.completion_status == "unknown"
+    assert after.completion_status == "completed"
+    assert before.state_token != after.state_token
+
+
+def test_calendar_completion_only_finalization_failure_is_retryable_local_error(
+    tmp_path: Path,
+) -> None:
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    backend = FakeCalendarBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
+    with sidecar.connect() as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_success_status
+            BEFORE UPDATE OF status ON idempotency_key
+            WHEN NEW.status = 'succeeded'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected finalization failure');
+            END
+            """
+        )
+
+    with pytest.raises(ToolContractError) as captured:
+        repository.update_event(
+            target_ref=TargetRef(
+                resource_type="calendar_event",
+                item_id="event-1",
+                container_id="Personal",
+            ),
+            description=None,
+            completion_status="completed",
+            expected_state_token=None,
+            source_refs=[],
+            confirmed_by_user=True,
+            idempotency_key="calendar:update:local-fault",
+        )
+
+    assert captured.value.code == "LOCAL_PERSISTENCE_FAILURE"
+    assert captured.value.retryable is True
+    assert backend.update_calls == []
 
 
 def test_update_event_can_clear_description_without_completion_confirmation(

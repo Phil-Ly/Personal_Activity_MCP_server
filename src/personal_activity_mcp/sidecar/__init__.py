@@ -1,8 +1,8 @@
 """SQLite sidecar storage for local metadata, idempotency, and audit records."""
 
+from personal_activity_mcp.sidecar.controlled_write import ControlledWrite, request_hash
 from personal_activity_mcp.sidecar.repository import (
     ExternalItemContext,
-    IdempotencyDecision,
     SidecarRepository,
 )
 from personal_activity_mcp.sidecar.write_control import (
@@ -15,11 +15,12 @@ from personal_activity_mcp.sidecar.write_control import (
 
 __all__ = [
     "AuditWrite",
+    "ControlledWrite",
     "ExternalItemContext",
-    "IdempotencyDecision",
     "McpItemWrite",
     "OperationResult",
     "ReservationDecision",
     "SidecarRepository",
     "WriteControl",
+    "request_hash",
 ]

@@ -12,6 +12,11 @@ _PROHIBITED_SENSITIVE_PATTERN = re.compile(
 )
 
 
+def normalize_optional_text(value: str | None) -> str | None:
+    """Use null for an optional text field whose external effect is empty."""
+    return None if value == "" else value
+
+
 def normalize_source_refs(values: list[str]) -> list[str]:
     """Trim, validate, deduplicate, and stably order opaque source references."""
     if len(values) > MAX_SOURCE_REFS:

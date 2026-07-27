@@ -3,25 +3,23 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from personal_activity_mcp.common.jxa import (
+    JXABackendError,
+    optional_json_int,
+    optional_json_string,
+    required_json_bool,
+    required_json_string,
+    run_jxa,
+)
 from personal_activity_mcp.reminders.models import ReminderRecord
 
 
-class ReminderBackendError(RuntimeError):
+class ReminderBackendError(JXABackendError):
     """Raised when Reminders.app automation fails."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        external_state_changed: bool | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.external_state_changed = external_state_changed
 
 
 class MacOSReminderBackend:
@@ -53,10 +51,7 @@ class MacOSReminderBackend:
                 "true" if include_notes else "false",
             ],
         )
-        rows = json.loads(payload)
-        if not isinstance(rows, list):
-            raise ReminderBackendError("Reminders list_reminders returned a non-list payload")
-        return [_record_from_payload(row) for row in rows]
+        return _records_from_json(payload, operation="list_reminders")
 
     def create_reminder(
         self,
@@ -77,10 +72,7 @@ class MacOSReminderBackend:
                 "" if priority is None else str(priority),
             ],
         )
-        row = json.loads(payload)
-        if not isinstance(row, dict):
-            raise ReminderBackendError("Reminders create_reminder returned a non-object payload")
-        return _record_from_payload(row)
+        return _record_from_json(payload, operation="create_reminder")
 
     def complete_reminder(
         self,
@@ -97,10 +89,7 @@ class MacOSReminderBackend:
                 completion_date.isoformat(),
             ],
         )
-        row = json.loads(payload)
-        if not isinstance(row, dict):
-            raise ReminderBackendError("Reminders complete_reminder returned a non-object payload")
-        return _record_from_payload(row)
+        return _record_from_json(payload, operation="complete_reminder")
 
     def get_reminder(
         self,
@@ -112,48 +101,57 @@ class MacOSReminderBackend:
             _GET_REMINDER_JXA,
             [list_id, reminder_id],
         )
-        row = json.loads(payload)
-        if not isinstance(row, dict):
-            raise ReminderBackendError("Reminders get_reminder returned a non-object payload")
-        return _record_from_payload(row)
+        return _record_from_json(payload, operation="get_reminder")
 
     def _run_jxa(self, script: str, args: list[str]) -> str:
-        try:
-            result = subprocess.run(
-                [str(self._osascript_path), "-l", "JavaScript", "-e", script, *args],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise ReminderBackendError(
-                f"Unable to run osascript: {error}",
-                external_state_changed=False,
-            ) from error
-        if result.returncode != 0:
-            message = result.stderr.strip() or result.stdout.strip() or "unknown Reminders error"
-            raise ReminderBackendError(f"Reminders automation failed: {message}")
-        return result.stdout.strip()
+        return run_jxa(
+            self._osascript_path,
+            script,
+            args,
+            application_name="Reminders",
+            error_type=ReminderBackendError,
+        )
 
 
 def _record_from_payload(row: Any) -> ReminderRecord:
     if not isinstance(row, dict):
         raise ReminderBackendError("Reminder row must be an object")
-    due_date = datetime.fromisoformat(str(row["due_date"])) if row.get("due_date") else None
-    completion_date = (
-        datetime.fromisoformat(str(row["completion_date"])) if row.get("completion_date") else None
-    )
+    due_date_value = optional_json_string(row, "due_date")
+    completion_date_value = optional_json_string(row, "completion_date")
     return ReminderRecord(
-        reminder_id=str(row["reminder_id"]),
-        list_id=str(row["list_id"]),
-        title=str(row["title"]),
-        notes=str(row["notes"]) if row.get("notes") else None,
-        due_date=due_date,
-        priority=int(row["priority"]) if row.get("priority") is not None else None,
-        is_completed=bool(row["is_completed"]),
-        completion_date=completion_date,
+        reminder_id=required_json_string(row, "reminder_id"),
+        list_id=required_json_string(row, "list_id"),
+        title=required_json_string(row, "title"),
+        notes=optional_json_string(row, "notes"),
+        due_date=datetime.fromisoformat(due_date_value) if due_date_value is not None else None,
+        priority=optional_json_int(row, "priority"),
+        is_completed=required_json_bool(row, "is_completed"),
+        completion_date=(
+            datetime.fromisoformat(completion_date_value)
+            if completion_date_value is not None
+            else None
+        ),
     )
+
+
+def _record_from_json(payload: str, *, operation: str) -> ReminderRecord:
+    try:
+        row = json.loads(payload)
+        if not isinstance(row, dict):
+            raise TypeError("expected an object")
+        return _record_from_payload(row)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ReminderBackendError(f"Reminders {operation} returned an invalid payload") from error
+
+
+def _records_from_json(payload: str, *, operation: str) -> list[ReminderRecord]:
+    try:
+        rows = json.loads(payload)
+        if not isinstance(rows, list):
+            raise TypeError("expected a list")
+        return [_record_from_payload(row) for row in rows]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ReminderBackendError(f"Reminders {operation} returned an invalid payload") from error
 
 
 _LOCAL_DATE_FORMATTER_JXA = r"""

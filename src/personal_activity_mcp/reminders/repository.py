@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import UTC, date, datetime, time
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from personal_activity_mcp.common import (
     TargetRef,
-    ToolContractError,
     ToolWarning,
     decode_cursor,
+    normalize_optional_text,
     normalize_source_refs,
     paginate,
     validate_limit,
@@ -28,13 +26,17 @@ from personal_activity_mcp.reminders.models import (
 )
 from personal_activity_mcp.sidecar import (
     AuditWrite,
+    ControlledWrite,
     ExternalItemContext,
     McpItemWrite,
-    ReservationDecision,
     SidecarRepository,
     WriteControl,
+    request_hash,
 )
-from personal_activity_mcp.time_policy import require_aware_datetime
+from personal_activity_mcp.time_policy import (
+    normalize_external_datetime,
+    require_aware_datetime,
+)
 
 
 class ReminderBackend(Protocol):
@@ -184,10 +186,11 @@ class ReminderRepository:
             raise ValueError("idempotency_key must be a non-empty string")
         if priority is not None and priority not in {0, 1, 5, 9}:
             raise ValueError("priority must be one of 0, 1, 5, or 9")
+        notes = normalize_optional_text(notes)
 
         normalized_source_refs = normalize_source_refs(source_refs)
         normalized_priority = priority or 0
-        request_hash = _request_hash(
+        request_digest = request_hash(
             {
                 "list_id": list_id,
                 "title": title,
@@ -198,18 +201,15 @@ class ReminderRepository:
             }
         )
         write_control = self._require_write_control()
-        decision = write_control.reserve_operation(
+        flow = ControlledWrite(
+            control=write_control,
             idempotency_key=idempotency_key,
             operation="reminders.create_reminder",
-            request_hash=request_hash,
-        )
-        write_control.audit_non_executable_reservation(
-            decision,
-            operation="reminders.create_reminder",
-            request_hash=request_hash,
+            request_hash=request_digest,
             confirmed_by_user=False,
+            resource_name="Reminder",
         )
-        _raise_for_non_executable_reservation(decision)
+        decision = flow.reserve()
         if decision.status == "deduplicated":
             item = self._sidecar.get_mcp_item(decision.result_item_id or "")
             if item is None:
@@ -233,30 +233,27 @@ class ReminderRepository:
                 priority=priority,
             )
         except Exception as error:
-            _finalize_backend_failure(
-                write_control,
-                idempotency_key=idempotency_key,
-                operation="reminders.create_reminder",
-                request_hash=request_hash,
-                confirmed_by_user=False,
-                error=error,
+            flow.backend_failed(error)
+        if not record.reminder_id.strip() or record.list_id != list_id:
+            flow.unverified_result()
+        try:
+            record = self._backend.get_reminder(
+                reminder_id=record.reminder_id,
+                list_id=list_id,
             )
+        except Exception:
+            flow.unverified_result()
         if not _created_reminder_matches_request(
             record,
             list_id=list_id,
+            title=title,
+            notes=notes,
             due_date=due_date,
             priority=normalized_priority,
             timezone=self._default_timezone,
         ):
-            _finalize_unverified_result(
-                write_control,
-                idempotency_key=idempotency_key,
-                operation="reminders.create_reminder",
-                request_hash=request_hash,
-                confirmed_by_user=False,
-            )
-        stable_id = _stable_reminder_item_id(idempotency_key)
-        due_at = _normalize_due_at(record.due_date, self._default_timezone)
+            flow.unverified_result()
+        stable_id = _stable_reminder_item_id(list_id, record.reminder_id)
         try:
             write_control.finalize_success(
                 idempotency_key=idempotency_key,
@@ -266,24 +263,20 @@ class ReminderRepository:
                     item_type="reminder",
                     external_id=record.reminder_id,
                     external_container_id=list_id,
-                    title_hash=_request_hash({"title": title}),
-                    time_start=due_at.isoformat() if due_at else None,
-                    time_end=due_at.isoformat() if due_at else None,
                     status_semantics="planned",
-                    state_token=_reminder_state_token(record, due_at=due_at),
                     created_by_mcp=True,
-                    source_relation_type="created_from",
                 ),
                 source_refs=normalized_source_refs,
                 audit=AuditWrite(
-                    request_hash=request_hash,
+                    request_hash=request_digest,
                     result_status="succeeded",
                     error_code=None,
                     confirmed_by_user=False,
                 ),
+                external_write_attempted=True,
             )
         except Exception as error:
-            raise _external_state_unknown_error() from error
+            flow.finalization_failed(error, external_write_attempted=True)
         return ReminderCreateResult(
             reminder_id=record.reminder_id,
             list_id=list_id,
@@ -319,6 +312,7 @@ class ReminderRepository:
         if not source.allow_write:
             raise ValueError(f"Reminder list is not allowed for writes: {list_id}")
         require_aware_datetime(completion_date, "completion_date")
+        completion_date = normalize_external_datetime(completion_date)
         if self._sidecar is None:
             raise ValueError("sidecar is required for reminders.complete_reminder")
         if not idempotency_key.strip():
@@ -330,36 +324,29 @@ class ReminderRepository:
             "expected_state_token": expected_state_token,
             "confirmed_by_user": confirmed_by_user,
         }
-        request_hash = _request_hash(request_payload)
+        request_digest = request_hash(request_payload)
         sidecar_item = self._sidecar.find_mcp_item_by_external(
             item_type="reminder",
             external_id=reminder_id,
             external_container_id=list_id,
         )
+        write_control = self._require_write_control()
+        flow = ControlledWrite(
+            control=write_control,
+            idempotency_key=idempotency_key,
+            operation="reminders.complete_reminder",
+            request_hash=request_digest,
+            confirmed_by_user=confirmed_by_user,
+            resource_name="Reminder",
+        )
         if not confirmed_by_user:
-            self._sidecar.record_operation_audit(
-                operation="reminders.complete_reminder",
+            flow.record_blocked(
                 target_item_id=str(sidecar_item["id"]) if sidecar_item is not None else None,
-                request_hash=request_hash,
-                result_status="blocked",
                 error_code="USER_CONFIRMATION_REQUIRED",
-                confirmed_by_user=False,
             )
             raise ValueError("confirmed_by_user is required")
 
-        write_control = self._require_write_control()
-        decision = write_control.reserve_operation(
-            idempotency_key=idempotency_key,
-            operation="reminders.complete_reminder",
-            request_hash=request_hash,
-        )
-        write_control.audit_non_executable_reservation(
-            decision,
-            operation="reminders.complete_reminder",
-            request_hash=request_hash,
-            confirmed_by_user=True,
-        )
-        _raise_for_non_executable_reservation(decision)
+        decision = flow.reserve()
         if decision.status == "deduplicated":
             item = self._sidecar.get_mcp_item(decision.result_item_id or "")
             if item is None:
@@ -387,32 +374,15 @@ class ReminderRepository:
                 list_id=list_id,
             )
         except Exception as error:
-            _finalize_preflight_backend_failure(
-                write_control,
-                idempotency_key=idempotency_key,
-                operation="reminders.complete_reminder",
-                request_hash=request_hash,
-                confirmed_by_user=True,
-                error=error,
-            )
+            flow.preflight_failed(error)
         if current.reminder_id != reminder_id or current.list_id != list_id:
-            _finalize_external_state_changed(
-                write_control,
-                idempotency_key=idempotency_key,
-                operation="reminders.complete_reminder",
-                request_hash=request_hash,
-            )
+            flow.external_state_changed()
         current_due_at = _normalize_due_at(current.due_date, self._default_timezone)
         if (
             expected_state_token is not None
             and _reminder_state_token(current, due_at=current_due_at) != expected_state_token
         ):
-            _finalize_external_state_changed(
-                write_control,
-                idempotency_key=idempotency_key,
-                operation="reminders.complete_reminder",
-                request_hash=request_hash,
-            )
+            flow.external_state_changed()
 
         already_satisfied = current.is_completed and current.completion_date == completion_date
         if already_satisfied:
@@ -425,27 +395,14 @@ class ReminderRepository:
                     completion_date=completion_date,
                 )
             except Exception as error:
-                _finalize_backend_failure(
-                    write_control,
-                    idempotency_key=idempotency_key,
-                    operation="reminders.complete_reminder",
-                    request_hash=request_hash,
-                    confirmed_by_user=True,
-                    error=error,
-                )
+                flow.backend_failed(error)
         if (
             record.reminder_id != reminder_id
             or record.list_id != list_id
             or not record.is_completed
             or record.completion_date != completion_date
         ):
-            _finalize_unverified_result(
-                write_control,
-                idempotency_key=idempotency_key,
-                operation="reminders.complete_reminder",
-                request_hash=request_hash,
-                confirmed_by_user=True,
-            )
+            flow.unverified_result()
 
         sidecar_item = self._sidecar.find_mcp_item_by_external(
             item_type="reminder",
@@ -455,11 +412,10 @@ class ReminderRepository:
         stable_id = (
             str(sidecar_item["id"])
             if sidecar_item is not None
-            else _stable_completed_reminder_item_id(record.list_id, reminder_id)
+            else _stable_reminder_item_id(record.list_id, reminder_id)
         )
-        due_at = _normalize_due_at(record.due_date, self._default_timezone)
         audit = AuditWrite(
-            request_hash=request_hash,
+            request_hash=request_digest,
             result_status="succeeded",
             error_code=None,
             confirmed_by_user=True,
@@ -473,19 +429,18 @@ class ReminderRepository:
                     item_type="reminder",
                     external_id=record.reminder_id,
                     external_container_id=record.list_id,
-                    title_hash=_request_hash({"title": record.title}),
-                    time_start=due_at.isoformat() if due_at else None,
-                    time_end=due_at.isoformat() if due_at else None,
                     status_semantics="confirmed",
-                    state_token=_reminder_state_token(record, due_at=due_at),
                     created_by_mcp=bool(sidecar_item and sidecar_item["created_by_mcp"]),
-                    source_relation_type="updated_from",
                 ),
                 source_refs=[],
                 audit=audit,
+                external_write_attempted=not already_satisfied,
             )
         except Exception as error:
-            raise _external_state_unknown_error() from error
+            flow.finalization_failed(
+                error,
+                external_write_attempted=not already_satisfied,
+            )
         return ReminderCompleteResult(
             reminder_id=record.reminder_id,
             list_id=record.list_id,
@@ -583,6 +538,8 @@ def _created_reminder_matches_request(
     record: ReminderRecord,
     *,
     list_id: str,
+    title: str,
+    notes: str | None,
     due_date: date | None,
     priority: int,
     timezone: ZoneInfo,
@@ -592,8 +549,12 @@ def _created_reminder_matches_request(
     return (
         bool(record.reminder_id.strip())
         and record.list_id == list_id
+        and record.title == title
+        and record.notes == notes
         and actual_due_date == due_date
         and (record.priority or 0) == priority
+        and record.is_completed is False
+        and record.completion_date is None
     )
 
 
@@ -670,7 +631,7 @@ def _reminder_state_token(
         "is_completed": record.is_completed,
         "completion_date": record.completion_date.isoformat() if record.completion_date else None,
     }
-    return f"reminder-state:{_request_hash(payload)}"
+    return f"reminder-state:{request_hash(payload)}"
 
 
 def _reminder_sort_key(reminder: ReminderEvidence) -> tuple[datetime, str, str]:
@@ -691,156 +652,20 @@ def _reminder_page_key(reminder: ReminderEvidence) -> tuple[str, ...]:
 
 
 def _reminder_evidence_id(list_id: str, reminder_id: str) -> str:
-    digest = hashlib.sha256(f"{list_id}:{reminder_id}".encode()).hexdigest()
+    digest = request_hash(
+        {
+            "external_container_id": list_id,
+            "external_id": reminder_id,
+        }
+    )
     return f"reminder:{digest[:32]}"
 
 
-def _stable_reminder_item_id(idempotency_key: str) -> str:
-    digest = hashlib.sha256(idempotency_key.encode()).hexdigest()
+def _stable_reminder_item_id(list_id: str, reminder_id: str) -> str:
+    digest = request_hash(
+        {
+            "external_container_id": list_id,
+            "external_id": reminder_id,
+        }
+    )
     return f"reminder:{digest[:32]}"
-
-
-def _stable_completed_reminder_item_id(list_id: str, reminder_id: str) -> str:
-    digest = hashlib.sha256(f"{list_id}:{reminder_id}".encode()).hexdigest()
-    return f"reminder:{digest[:32]}"
-
-
-def _request_hash(payload: dict[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-def _raise_for_non_executable_reservation(decision: ReservationDecision) -> None:
-    if decision.status == "conflict":
-        raise ValueError("idempotency_key conflicts with different request")
-    if decision.status == "in_progress":
-        raise ToolContractError(
-            code="OPERATION_IN_PROGRESS",
-            message="The same write operation is already in progress",
-            retryable=True,
-            public_message="The same write operation is already in progress",
-        )
-    if decision.status == "external_state_unknown":
-        raise _external_state_unknown_error()
-
-
-def _finalize_backend_failure(
-    write_control: WriteControl,
-    *,
-    idempotency_key: str,
-    operation: str,
-    request_hash: str,
-    confirmed_by_user: bool,
-    error: Exception,
-) -> None:
-    external_state_changed = getattr(error, "external_state_changed", None)
-    if external_state_changed is False:
-        write_control.finalize_failure(
-            idempotency_key=idempotency_key,
-            operation=operation,
-            status="failed",
-            error_code="BACKEND_FAILURE",
-            audit=AuditWrite(
-                request_hash=request_hash,
-                result_status="failed",
-                error_code="BACKEND_FAILURE",
-                confirmed_by_user=confirmed_by_user,
-            ),
-        )
-        raise error
-    write_control.finalize_failure(
-        idempotency_key=idempotency_key,
-        operation=operation,
-        status="external_state_unknown",
-        error_code="EXTERNAL_STATE_UNKNOWN",
-        audit=AuditWrite(
-            request_hash=request_hash,
-            result_status="external_state_unknown",
-            error_code="EXTERNAL_STATE_UNKNOWN",
-            confirmed_by_user=confirmed_by_user,
-        ),
-    )
-    raise _external_state_unknown_error() from error
-
-
-def _finalize_preflight_backend_failure(
-    write_control: WriteControl,
-    *,
-    idempotency_key: str,
-    operation: str,
-    request_hash: str,
-    confirmed_by_user: bool,
-    error: Exception,
-) -> None:
-    write_control.finalize_failure(
-        idempotency_key=idempotency_key,
-        operation=operation,
-        status="failed",
-        error_code="BACKEND_FAILURE",
-        audit=AuditWrite(
-            request_hash=request_hash,
-            result_status="failed",
-            error_code="BACKEND_FAILURE",
-            confirmed_by_user=confirmed_by_user,
-        ),
-    )
-    raise error
-
-
-def _finalize_unverified_result(
-    write_control: WriteControl,
-    *,
-    idempotency_key: str,
-    operation: str,
-    request_hash: str,
-    confirmed_by_user: bool,
-) -> None:
-    write_control.finalize_failure(
-        idempotency_key=idempotency_key,
-        operation=operation,
-        status="external_state_unknown",
-        error_code="EXTERNAL_STATE_UNKNOWN",
-        audit=AuditWrite(
-            request_hash=request_hash,
-            result_status="external_state_unknown",
-            error_code="EXTERNAL_STATE_UNKNOWN",
-            confirmed_by_user=confirmed_by_user,
-        ),
-    )
-    raise _external_state_unknown_error()
-
-
-def _finalize_external_state_changed(
-    write_control: WriteControl,
-    *,
-    idempotency_key: str,
-    operation: str,
-    request_hash: str,
-) -> None:
-    write_control.finalize_failure(
-        idempotency_key=idempotency_key,
-        operation=operation,
-        status="failed",
-        error_code="EXTERNAL_STATE_CHANGED",
-        audit=AuditWrite(
-            request_hash=request_hash,
-            result_status="failed",
-            error_code="EXTERNAL_STATE_CHANGED",
-            confirmed_by_user=True,
-        ),
-    )
-    raise ToolContractError(
-        code="EXTERNAL_STATE_CHANGED",
-        message="The Reminder changed after it was read",
-        retryable=False,
-        public_message="The Reminder changed after it was read",
-    )
-
-
-def _external_state_unknown_error() -> ToolContractError:
-    return ToolContractError(
-        code="EXTERNAL_STATE_UNKNOWN",
-        message="The external write result could not be verified",
-        retryable=False,
-        public_message="The external write result is unknown and will not be retried automatically",
-    )

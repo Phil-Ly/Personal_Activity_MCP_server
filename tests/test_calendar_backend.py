@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from personal_activity_mcp.calendar import (
+    CalendarBackendError,
     DescriptionUpdate,
     MacOSCalendarBackend,
 )
@@ -58,3 +61,25 @@ def test_update_event_passes_explicit_clear_operation() -> None:
 
     assert backend.calls == [["Personal", "event-1", "clear", ""]]
     assert record.notes is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-json",
+        '{"event_id":"event-1"}',
+        event_payload(notes=None).replace(
+            '"is_all_day":false',
+            '"is_all_day":"false"',
+        ),
+        event_payload(notes=None).replace(
+            '"title":"Existing event"',
+            '"title":123',
+        ),
+    ],
+)
+def test_get_event_translates_malformed_payload_to_backend_error(payload: str) -> None:
+    backend = RecordingCalendarBackend([payload])
+
+    with pytest.raises(CalendarBackendError, match="invalid payload"):
+        backend.get_event(event_id="event-1", calendar_id="Personal")

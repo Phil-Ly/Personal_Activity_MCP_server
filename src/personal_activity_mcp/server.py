@@ -30,10 +30,6 @@ def create_server(
     config = load_config(config_path)
     sidecar = SidecarRepository(config.sidecar_path)
     sidecar.initialize()
-    for source in config.calendar_sources:
-        sidecar.upsert_calendar_source(source)
-    for source in config.reminder_sources:
-        sidecar.upsert_reminder_source(source)
     calendar_repository = CalendarRepository(
         config,
         calendar_backend or MacOSCalendarBackend(),

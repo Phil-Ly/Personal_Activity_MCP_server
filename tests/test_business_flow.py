@@ -63,6 +63,9 @@ class FlowCalendarBackend:
         self.events[(calendar_id, event.event_id)] = event
         return event
 
+    def get_event(self, *, event_id: str, calendar_id: str) -> CalendarEventRecord:
+        return self.events[(calendar_id, event_id)]
+
 
 def write_config(path: Path) -> None:
     sidecar_path = path.parent / "sidecar.sqlite3"

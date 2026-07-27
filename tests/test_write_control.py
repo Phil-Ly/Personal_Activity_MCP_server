@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,13 +26,9 @@ def item_write() -> McpItemWrite:
         item_type="calendar_event",
         external_id="event-1",
         external_container_id="Personal",
-        title_hash="title-hash",
-        time_start="2026-07-08T10:00:00+08:00",
-        time_end="2026-07-08T11:00:00+08:00",
         status_semantics="planned",
-        state_token="calendar-state:1",
         created_by_mcp=True,
-        source_relation_type="created_from",
+        completion_status="unknown",
     )
 
 
@@ -151,7 +148,7 @@ def test_failed_operation_can_be_reserved_again(tmp_path: Path) -> None:
     assert retry.status == "execute"
 
 
-def test_finalize_success_commits_mapping_links_idempotency_and_audit_together(
+def test_finalize_success_commits_compact_item_idempotency_and_audit_together(
     tmp_path: Path,
 ) -> None:
     repository, control = make_control(tmp_path)
@@ -172,16 +169,14 @@ def test_finalize_success_commits_mapping_links_idempotency_and_audit_together(
 
     with repository.connect() as connection:
         item = connection.execute("SELECT * FROM mcp_item").fetchone()
-        links = connection.execute(
-            "SELECT source_ref FROM source_link ORDER BY source_ref"
-        ).fetchall()
         idempotency = connection.execute("SELECT * FROM idempotency_key").fetchone()
         stored_audit = connection.execute("SELECT * FROM operation_audit").fetchone()
     assert item["id"] == "calendar:event-1"
-    assert item["state_token"] == "calendar-state:1"
-    assert [row["source_ref"] for row in links] == ["file:a", "file:b"]
+    assert json.loads(item["source_refs_json"]) == ["file:a", "file:b"]
+    assert item["completion_status"] == "unknown"
     assert idempotency["status"] == "succeeded"
     assert idempotency["result_item_id"] == "calendar:event-1"
+    assert idempotency["audit_id"] == audit.audit_id
     assert stored_audit["id"] == audit.audit_id
     assert stored_audit["result_status"] == "succeeded"
 
@@ -198,15 +193,16 @@ def test_finalize_success_rolls_back_partial_rows_and_marks_unknown(
     with repository.connect() as connection:
         connection.execute(
             """
-            CREATE TRIGGER fail_source_link
-            BEFORE INSERT ON source_link
+            CREATE TRIGGER fail_success_status
+            BEFORE UPDATE OF status ON idempotency_key
+            WHEN NEW.status = 'succeeded'
             BEGIN
-                SELECT RAISE(ABORT, 'injected source link failure');
+                SELECT RAISE(ABORT, 'injected finalization failure');
             END
             """
         )
 
-    with pytest.raises(sqlite3.IntegrityError, match="injected source link failure"):
+    with pytest.raises(sqlite3.IntegrityError, match="injected finalization failure"):
         control.finalize_success(
             idempotency_key="calendar:create:fault",
             operation="calendar.create_event",
@@ -217,7 +213,6 @@ def test_finalize_success_rolls_back_partial_rows_and_marks_unknown(
 
     with repository.connect() as connection:
         item_count = connection.execute("SELECT COUNT(*) FROM mcp_item").fetchone()[0]
-        link_count = connection.execute("SELECT COUNT(*) FROM source_link").fetchone()[0]
         status = connection.execute(
             """
             SELECT status
@@ -232,9 +227,54 @@ def test_finalize_success_rolls_back_partial_rows_and_marks_unknown(
         request_hash="request-hash",
     )
     assert item_count == 0
-    assert link_count == 0
     assert status == "external_state_unknown"
     assert retry.status == "external_state_unknown"
+
+
+def test_finalize_success_marks_local_only_failure_retryable(
+    tmp_path: Path,
+) -> None:
+    repository, control = make_control(tmp_path)
+    control.reserve_operation(
+        idempotency_key="calendar:update:local-fault",
+        operation="calendar.update_event",
+        request_hash="request-hash",
+    )
+    with repository.connect() as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_success_status
+            BEFORE UPDATE OF status ON idempotency_key
+            WHEN NEW.status = 'succeeded'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected finalization failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected finalization failure"):
+        control.finalize_success(
+            idempotency_key="calendar:update:local-fault",
+            operation="calendar.update_event",
+            item=item_write(),
+            source_refs=[],
+            audit=audit_write(),
+            external_write_attempted=False,
+        )
+
+    result = control.get_operation_result(
+        idempotency_key="calendar:update:local-fault",
+        operation="calendar.update_event",
+    )
+    assert result is not None
+    assert result.status == "failed"
+    assert result.error_code == "LOCAL_PERSISTENCE_FAILURE"
+    retry = control.reserve_operation(
+        idempotency_key="calendar:update:local-fault",
+        operation="calendar.update_event",
+        request_hash="request-hash",
+    )
+    assert retry.status == "execute"
 
 
 def test_rejected_second_finalization_does_not_append_unknown_audit(
@@ -278,7 +318,7 @@ def test_rejected_second_finalization_does_not_append_unknown_audit(
     assert [row["result_status"] for row in audits] == ["succeeded"]
 
 
-def test_operation_result_matches_audit_by_terminal_state_when_hashes_repeat(
+def test_operation_result_uses_direct_audit_id_when_request_hashes_repeat(
     tmp_path: Path,
 ) -> None:
     _, control = make_control(tmp_path)
@@ -336,3 +376,200 @@ def test_operation_result_matches_audit_by_terminal_state_when_hashes_repeat(
     assert failure.audit_id == failure_audit.audit_id
     assert failure.audit_result_status == "failed"
     assert failure.audit_error_code == "BACKEND_FAILURE"
+
+
+def test_finalize_success_merges_source_refs_and_preserves_calendar_completion(
+    tmp_path: Path,
+) -> None:
+    repository, control = make_control(tmp_path)
+    control.reserve_operation(
+        idempotency_key="calendar:create:1",
+        operation="calendar.create_event",
+        request_hash="create-hash",
+    )
+    control.finalize_success(
+        idempotency_key="calendar:create:1",
+        operation="calendar.create_event",
+        item=item_write().model_copy(update={"completion_status": "completed"}),
+        source_refs=["file:a"],
+        audit=AuditWrite(
+            request_hash="create-hash",
+            result_status="succeeded",
+            error_code=None,
+            confirmed_by_user=True,
+        ),
+    )
+    control.reserve_operation(
+        idempotency_key="calendar:update:1",
+        operation="calendar.update_event",
+        request_hash="update-hash",
+    )
+    control.finalize_success(
+        idempotency_key="calendar:update:1",
+        operation="calendar.update_event",
+        item=item_write().model_copy(update={"completion_status": None}),
+        source_refs=["file:b", "file:a"],
+        audit=AuditWrite(
+            request_hash="update-hash",
+            result_status="succeeded",
+            error_code=None,
+            confirmed_by_user=True,
+        ),
+    )
+
+    with repository.connect() as connection:
+        item = connection.execute(
+            "SELECT completion_status, source_refs_json FROM mcp_item"
+        ).fetchone()
+
+    assert item["completion_status"] == "completed"
+    assert json.loads(item["source_refs_json"]) == ["file:a", "file:b"]
+
+
+def test_finalize_success_never_reassigns_an_item_id_to_another_external_item(
+    tmp_path: Path,
+) -> None:
+    repository, control = make_control(tmp_path)
+    control.reserve_operation(
+        idempotency_key="calendar:create:1",
+        operation="calendar.create_event",
+        request_hash="request-hash",
+    )
+    control.finalize_success(
+        idempotency_key="calendar:create:1",
+        operation="calendar.create_event",
+        item=item_write(),
+        source_refs=[],
+        audit=audit_write(),
+    )
+    control.reserve_operation(
+        idempotency_key="calendar:update:2",
+        operation="calendar.update_event",
+        request_hash="other-hash",
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="item identity"):
+        control.finalize_success(
+            idempotency_key="calendar:update:2",
+            operation="calendar.update_event",
+            item=item_write().model_copy(
+                update={
+                    "external_id": "event-2",
+                    "created_by_mcp": False,
+                }
+            ),
+            source_refs=[],
+            audit=AuditWrite(
+                request_hash="other-hash",
+                result_status="succeeded",
+                error_code=None,
+                confirmed_by_user=True,
+            ),
+        )
+
+    assert repository.get_mcp_item("calendar:event-1")["external_id"] == "event-1"
+
+
+def test_finalize_success_allows_cumulative_source_refs_beyond_request_limit(
+    tmp_path: Path,
+) -> None:
+    repository, control = make_control(tmp_path)
+    first_refs = [f"file:first/{index}" for index in range(60)]
+    second_refs = [f"file:second/{index}" for index in range(60)]
+    control.reserve_operation(
+        idempotency_key="calendar:create:refs",
+        operation="calendar.create_event",
+        request_hash="create-hash",
+    )
+    control.finalize_success(
+        idempotency_key="calendar:create:refs",
+        operation="calendar.create_event",
+        item=item_write(),
+        source_refs=first_refs,
+        audit=AuditWrite(
+            request_hash="create-hash",
+            result_status="succeeded",
+            error_code=None,
+            confirmed_by_user=True,
+        ),
+    )
+    control.reserve_operation(
+        idempotency_key="calendar:update:refs",
+        operation="calendar.update_event",
+        request_hash="update-hash",
+    )
+
+    control.finalize_success(
+        idempotency_key="calendar:update:refs",
+        operation="calendar.update_event",
+        item=item_write(),
+        source_refs=second_refs,
+        audit=AuditWrite(
+            request_hash="update-hash",
+            result_status="succeeded",
+            error_code=None,
+            confirmed_by_user=True,
+        ),
+    )
+
+    item = repository.get_mcp_item("calendar:event-1")
+    assert item is not None
+    assert len(json.loads(str(item["source_refs_json"]))) == 120
+
+
+def test_finalize_success_compare_and_sets_calendar_completion_status(
+    tmp_path: Path,
+) -> None:
+    repository, control = make_control(tmp_path)
+    control.reserve_operation(
+        idempotency_key="calendar:update:first",
+        operation="calendar.update_event",
+        request_hash="first-hash",
+    )
+    control.reserve_operation(
+        idempotency_key="calendar:update:second",
+        operation="calendar.update_event",
+        request_hash="second-hash",
+    )
+    control.finalize_success(
+        idempotency_key="calendar:update:first",
+        operation="calendar.update_event",
+        item=item_write().model_copy(
+            update={
+                "completion_status": "completed",
+                "expected_completion_status": "unknown",
+            }
+        ),
+        source_refs=[],
+        audit=AuditWrite(
+            request_hash="first-hash",
+            result_status="succeeded",
+            error_code=None,
+            confirmed_by_user=True,
+        ),
+        external_write_attempted=False,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="completion status changed"):
+        control.finalize_success(
+            idempotency_key="calendar:update:second",
+            operation="calendar.update_event",
+            item=item_write().model_copy(
+                update={
+                    "completion_status": "incomplete",
+                    "expected_completion_status": "unknown",
+                }
+            ),
+            source_refs=[],
+            audit=AuditWrite(
+                request_hash="second-hash",
+                result_status="succeeded",
+                error_code=None,
+                confirmed_by_user=True,
+            ),
+            external_write_attempted=False,
+        )
+
+    item = repository.get_mcp_item("calendar:event-1")
+    assert item is not None
+    assert item["completion_status"] == "completed"
