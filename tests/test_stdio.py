@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import anyio
@@ -13,7 +14,7 @@ def test_real_stdio_session_exposes_no_local_file_capability(tmp_path: Path) -> 
     async def exercise_server() -> None:
         stderr_path = tmp_path / "server.stderr"
         parameters = StdioServerParameters(
-            command=str(Path.cwd() / ".venv/bin/python"),
+            command=sys.executable,
             args=[
                 "-m",
                 "personal_activity_mcp.server",
