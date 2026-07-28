@@ -1,0 +1,220 @@
+# Personal Activity MCP
+
+Personal Activity MCP 是一个仅在本机运行的 macOS MCP Server，为 Agent 提供受控的
+Apple 日历、Apple 提醒事项和本地 Sidecar 数据访问能力。Server 使用 stdio 与 Agent
+通信，不提供远程传输服务。
+
+## 功能
+
+- 读取显式授权的 Apple 日历日程。
+- 在显式开启写权限的日历中创建日程。
+- 更新已定位日程的描述信息和完成状态。
+- 读取显式授权的 Apple 提醒事项列表。
+- 在显式开启写权限的列表中创建提醒事项。
+- 经用户确认后将提醒事项标记为完成。
+- 提供可按任意时间范围使用的活动回顾总结 Prompt。
+- 使用本地 SQLite Sidecar 记录外部对象映射、来源引用、幂等状态和操作审计结果。
+
+所有能力都可以由 Agent 独立调用。对话编排、业务优先级判断、用户追问和最终文案生成
+由 Agent 负责；MCP Server 负责配置授权、参数校验、写入保护、幂等控制和本地持久化。
+
+## 运行要求
+
+- macOS。
+- Python 3.11 或更高版本。
+- 系统自带的 Apple 日历和 Apple 提醒事项应用。
+- 一个支持本地 stdio MCP Server 的 Agent 或 MCP 客户端。
+
+首次读取或写入时，macOS 可能要求当前 MCP 客户端或启动它的终端获得日历、提醒事项
+自动化权限。只应为实际使用的客户端授权。
+
+## 安装
+
+发布到 PyPI 后，推荐使用 `uvx` 直接运行：
+
+```bash
+uvx personal-activity-mcp --help
+```
+
+也可以安装到独立 Python 环境：
+
+```bash
+python -m pip install personal-activity-mcp
+personal-activity-mcp --help
+```
+
+从源码参与开发时：
+
+```bash
+python -m pip install -e '.[dev]'
+```
+
+## 手工配置
+
+Server 默认读取：
+
+```text
+~/.config/personal-activity-mcp/config.toml
+```
+
+先创建配置目录和配置文件，并将文件权限限制为仅当前用户可读写：
+
+```bash
+mkdir -p ~/.config/personal-activity-mcp
+chmod 700 ~/.config/personal-activity-mcp
+touch ~/.config/personal-activity-mcp/config.toml
+chmod 600 ~/.config/personal-activity-mcp/config.toml
+```
+
+然后将下面的模板复制到 `config.toml`。模板中的日历和提醒事项名称都是虚构占位符，
+必须替换成当前 Mac 上实际存在的名称。
+
+```toml
+# 可省略。省略后使用相同的默认本地路径。
+sidecar_path = "~/Library/Application Support/personal-activity-mcp/personal_activity.sqlite3"
+
+# 使用 IANA 时区名称，例如 UTC、Asia/Shanghai 或 Europe/London。
+default_timezone = "UTC"
+
+[privacy]
+# 默认禁止日志记录敏感内容。没有明确需要时不要开启。
+sensitive_logging_enabled = false
+log_calendar_notes = false
+log_reminder_notes = false
+log_source_refs = false
+
+[security]
+# 当前版本仅支持本地 stdio、单项操作且不支持删除。
+allow_remote_transport = false
+allow_bulk_operations = false
+allow_delete_operations = false
+require_confirmation_for_event_completion_updates = true
+require_confirmation_for_reminder_completion = true
+
+[[calendar_sources]]
+# 必须与 Apple 日历侧边栏中的日历名称完全一致。
+calendar_id = "Your Calendar Name"
+title = "Calendar"
+# 建议先保持只读，确认读取范围正确后再按需改为 true。
+allow_write = false
+
+[[reminder_sources]]
+# 必须与 Apple 提醒事项侧边栏中的列表名称完全一致。
+list_id = "Your Reminder List Name"
+title = "Reminder List"
+# 建议先保持只读，确认读取范围正确后再按需改为 true。
+allow_write = false
+```
+
+### 配置字段说明
+
+- `sidecar_path`：MCP 自己维护的本地 SQLite 文件。可以省略并使用默认路径。
+- `default_timezone`：没有其他明确时区信息时使用的 IANA 时区。
+- `calendar_sources`：允许 MCP 访问的 Apple 日历白名单。
+- `reminder_sources`：允许 MCP 访问的 Apple 提醒事项列表白名单。
+- `calendar_id`：当前后端使用 Apple 日历中的日历名称作为标识。
+- `list_id`：当前后端使用 Apple 提醒事项中的列表名称作为标识。
+- `title`：面向 Agent 和用户显示的名称，可以与对应标识相同。
+- `allow_write`：控制对应日历或列表能否被写入；`false` 表示只读。
+
+如需授权多个日历或提醒事项列表，可以重复添加对应的
+`[[calendar_sources]]` 或 `[[reminder_sources]]` 区块。未写入配置的来源不会获得隐式
+访问权限。
+
+建议按照以下顺序启用：
+
+1. 在 Apple 日历和 Apple 提醒事项中确认需要访问的来源名称。
+2. 将名称逐字填写到配置文件，所有 `allow_write` 暂时保持 `false`。
+3. 让 Agent 分别测试日历和提醒事项读取能力，确认白名单范围正确。
+4. 只对确实需要写入的来源设置 `allow_write = true`。
+5. 首次写入前让 Agent 展示将要执行的动作，并由用户明确确认。
+
+配置加载器会拒绝远程传输、批量操作、删除操作以及关闭必要确认保护的设置。
+
+## 连接到 MCP 客户端
+
+不同客户端的配置入口不同，但本地 stdio 配置的核心结构如下：
+
+```json
+{
+  "mcpServers": {
+    "personal-activity": {
+      "command": "uvx",
+      "args": [
+        "personal-activity-mcp",
+        "--config",
+        "~/.config/personal-activity-mcp/config.toml"
+      ]
+    }
+  }
+}
+```
+
+如果已经通过 `pip` 安装，请将 `command` 改为该 Python 环境中
+`personal-activity-mcp` 可执行文件的路径，并保留 `--config` 参数。
+
+## 可用的 MCP 能力
+
+Tools：
+
+- `calendar.list_events`
+- `calendar.create_event`
+- `calendar.update_event`
+- `reminders.list_reminders`
+- `reminders.create_reminder`
+- `reminders.complete_reminder`
+
+Prompt：
+
+- `activity.review_summary`
+
+本项目不提供文件读取 Tool。需要读取用户自行维护的本地活动文件时，应由 Agent 使用
+自己的文件能力完成。
+
+## 隐私与安全
+
+- Server 和 SQLite Sidecar 均运行在用户本机。
+- Calendar 和 Reminder 访问范围由配置白名单限定。
+- 写权限按来源单独开启，不会因读取授权而自动获得。
+- 当前版本不提供远程传输、批量操作或删除能力。
+- 敏感日志默认关闭。
+- Sidecar 会保存外部对象标识、来源引用、请求哈希、状态和审计结果。调用方不应把正文、
+  密钥、访问令牌或其他敏感信息放进 `source_refs`。
+- 不要将真实的 `config.toml`、SQLite 文件、凭证或包含个人数据的日志提交到 Git。
+
+## 常见问题
+
+### 提示找不到配置文件
+
+确认配置文件位于默认路径，或显式传入：
+
+```bash
+personal-activity-mcp --config ~/.config/personal-activity-mcp/config.toml
+```
+
+### 读取结果为空
+
+先确认 `calendar_id` 或 `list_id` 与应用侧边栏中的名称完全一致，并确认请求的时间范围
+确实包含数据。
+
+### macOS 拒绝访问日历或提醒事项
+
+确认启动 MCP Server 的客户端已获得对应的 macOS 自动化权限。授权对象通常是 Agent
+客户端或启动它的终端，而不是 Python 包名称。
+
+### 写入被拒绝
+
+确认目标来源已经设置 `allow_write = true`。完成状态写入还必须携带明确的用户确认，
+并且不能绕过状态冲突和幂等检查。
+
+## 开发验证
+
+```bash
+pytest -q
+ruff check .
+ruff format --check .
+```
+
+## 许可证
+
+本项目使用 MIT License，详见 `LICENSE`。

@@ -5,12 +5,36 @@ build-backend = "hatchling.build"
 [project]
 name = "personal-activity-mcp"
 version = "0.12.0"
-description = "Local-only MCP server for personal activity data on macOS"
+description = "Local MCP server for Apple Calendar and Reminders on macOS"
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Phil-Ly" },
+]
+keywords = [
+    "mcp",
+    "apple-calendar",
+    "apple-reminders",
+    "macos",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS :: MacOS X",
+]
 dependencies = [
-    "mcp[cli]>=1.27,<2",
+    "mcp>=1.27,<2",
     "pydantic>=2.11,<3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Phil-Ly/Personal_Activity_MCP_server"
+Repository = "https://github.com/Phil-Ly/Personal_Activity_MCP_server"
+Issues = "https://github.com/Phil-Ly/Personal_Activity_MCP_server/issues"
 
 [project.optional-dependencies]
 dev = [
