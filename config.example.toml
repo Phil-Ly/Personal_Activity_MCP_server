@@ -5,7 +5,7 @@
 # Optional. The loader uses this same repository-external path when omitted.
 # The sidecar stores local metadata, idempotency records, source references,
 # and operation audit rows. It must not store source bodies or LLM summaries.
-sidecar_path = "~/Library/Application Support/personal-activity-mcp/personal_activity.sqlite3"
+sidecar_path = "~/Library/Application Support/pamcp/personal_activity.sqlite3"
 default_timezone = "Asia/Shanghai"
 
 [privacy]

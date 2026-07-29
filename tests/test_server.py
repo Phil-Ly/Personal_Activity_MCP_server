@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import anyio
+import pytest
 
 from personal_activity_mcp.calendar import CalendarEventRecord, DescriptionUpdate
 from personal_activity_mcp.reminders import ReminderRecord
@@ -236,6 +237,7 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
     tools = anyio.run(server.list_tools)
     templates = anyio.run(server.list_resource_templates)
 
+    assert server.name == "PAMCP"
     assert [tool.name for tool in tools] == [
         "calendar.list_events",
         "calendar.create_event",
@@ -393,6 +395,51 @@ def test_main_reports_missing_configuration_without_traceback(
     assert exit_code == 2
     assert "Configuration error: Configuration file not found" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_main_uses_pamcp_config_environment_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.toml"
+    launched: dict[str, object] = {}
+
+    class FakeServer:
+        def run(self, *, transport: str) -> None:
+            launched["transport"] = transport
+
+    def fake_create_server(path: Path) -> FakeServer:
+        launched["config_path"] = path
+        return FakeServer()
+
+    monkeypatch.setenv("PAMCP_CONFIG", str(config_path))
+    monkeypatch.setattr("personal_activity_mcp.server.create_server", fake_create_server)
+
+    assert main([]) == 0
+    assert launched == {
+        "config_path": config_path,
+        "transport": "stdio",
+    }
+
+
+def test_main_uses_pamcp_default_config_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    launched: dict[str, object] = {}
+
+    class FakeServer:
+        def run(self, *, transport: str) -> None:
+            launched["transport"] = transport
+
+    def fake_create_server(path: Path) -> FakeServer:
+        launched["config_path"] = path
+        return FakeServer()
+
+    monkeypatch.delenv("PAMCP_CONFIG", raising=False)
+    monkeypatch.setattr("personal_activity_mcp.server.create_server", fake_create_server)
+
+    assert main([]) == 0
+    assert launched == {
+        "config_path": Path("~/.config/pamcp/config.toml").expanduser(),
+        "transport": "stdio",
+    }
 
 
 def test_tool_failures_use_structured_public_error_contract(tmp_path: Path) -> None:

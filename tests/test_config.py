@@ -20,11 +20,7 @@ def test_load_config_accepts_configuration_without_local_file_sources(tmp_path: 
     assert (
         config.sidecar_path
         == (
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "personal-activity-mcp"
-            / "personal_activity.sqlite3"
+            Path.home() / "Library" / "Application Support" / "pamcp" / "personal_activity.sqlite3"
         ).resolve()
     )
 

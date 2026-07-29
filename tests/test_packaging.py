@@ -8,6 +8,8 @@ def test_pypi_metadata_describes_the_supported_distribution() -> None:
     pyproject = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     project = pyproject["project"]
 
+    assert project["name"] == "pamcp"
+    assert project["scripts"] == {"pamcp": "personal_activity_mcp.server:main"}
     assert project["readme"] == "README.md"
     assert project["license"] == "MIT"
     assert project["license-files"] == ["LICENSE"]
@@ -32,7 +34,7 @@ def test_runtime_dependencies_do_not_install_the_mcp_cli_extra() -> None:
 def test_readme_documents_safe_manual_configuration() -> None:
     readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "~/.config/personal-activity-mcp/config.toml" in readme
+    assert "~/.config/pamcp/config.toml" in readme
     assert 'calendar_id = "Your Calendar Name"' in readme
     assert 'list_id = "Your Reminder List Name"' in readme
     assert "allow_write = false" in readme

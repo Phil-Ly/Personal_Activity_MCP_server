@@ -8,11 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_SIDECAR_PATH = (
-    Path.home()
-    / "Library"
-    / "Application Support"
-    / "personal-activity-mcp"
-    / "personal_activity.sqlite3"
+    Path.home() / "Library" / "Application Support" / "pamcp" / "personal_activity.sqlite3"
 ).resolve()
 
 

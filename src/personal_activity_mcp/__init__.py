@@ -1,1 +1,1 @@
-"""Personal Activity MCP Server."""
+"""PAMCP Server."""

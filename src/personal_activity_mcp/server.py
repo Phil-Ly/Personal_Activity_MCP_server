@@ -18,7 +18,7 @@ from personal_activity_mcp.sidecar import SidecarRepository
 from personal_activity_mcp.tools.calendar import register_calendar_tools
 from personal_activity_mcp.tools.reminders import register_reminder_tools
 
-DEFAULT_CONFIG_PATH = Path("~/.config/personal-activity-mcp/config.toml").expanduser()
+DEFAULT_CONFIG_PATH = Path("~/.config/pamcp/config.toml").expanduser()
 
 
 def create_server(
@@ -41,7 +41,7 @@ def create_server(
         sidecar,
     )
     server = FastMCP(
-        "Personal Activity MCP",
+        "PAMCP",
         instructions="Access configured Calendar and Reminders capabilities.",
         log_level="WARNING",
     )
@@ -55,11 +55,11 @@ def create_server(
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Load configuration and run the local stdio server."""
-    parser = argparse.ArgumentParser(description="Personal Activity MCP Server")
+    parser = argparse.ArgumentParser(description="PAMCP Server")
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path(os.environ.get("PERSONAL_ACTIVITY_MCP_CONFIG", DEFAULT_CONFIG_PATH)),
+        default=Path(os.environ.get("PAMCP_CONFIG", DEFAULT_CONFIG_PATH)),
         help="Path to the local TOML configuration file",
     )
     args = parser.parse_args(argv)

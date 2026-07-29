@@ -1,6 +1,6 @@
-# Personal Activity MCP
+# PAMCP
 
-Personal Activity MCP 是一个仅在本机运行的 macOS MCP Server，为 Agent 提供受控的
+PAMCP（Personal Activity MCP）是一个仅在本机运行的 macOS MCP Server，为 Agent 提供受控的
 Apple 日历、Apple 提醒事项和本地 Sidecar 数据访问能力。Server 使用 stdio 与 Agent
 通信，不提供远程传输服务。
 
@@ -33,14 +33,14 @@ Apple 日历、Apple 提醒事项和本地 Sidecar 数据访问能力。Server �
 发布到 PyPI 后，推荐使用 `uvx` 直接运行：
 
 ```bash
-uvx personal-activity-mcp --help
+uvx pamcp --help
 ```
 
 也可以安装到独立 Python 环境：
 
 ```bash
-python -m pip install personal-activity-mcp
-personal-activity-mcp --help
+python -m pip install pamcp
+pamcp --help
 ```
 
 从源码参与开发时：
@@ -54,16 +54,19 @@ python -m pip install -e '.[dev]'
 Server 默认读取：
 
 ```text
-~/.config/personal-activity-mcp/config.toml
+~/.config/pamcp/config.toml
 ```
+
+也可以通过环境变量 `PAMCP_CONFIG` 指定其他配置文件路径，命令行 `--config` 的优先级
+更高。
 
 先创建配置目录和配置文件，并将文件权限限制为仅当前用户可读写：
 
 ```bash
-mkdir -p ~/.config/personal-activity-mcp
-chmod 700 ~/.config/personal-activity-mcp
-touch ~/.config/personal-activity-mcp/config.toml
-chmod 600 ~/.config/personal-activity-mcp/config.toml
+mkdir -p ~/.config/pamcp
+chmod 700 ~/.config/pamcp
+touch ~/.config/pamcp/config.toml
+chmod 600 ~/.config/pamcp/config.toml
 ```
 
 然后将下面的模板复制到 `config.toml`。模板中的日历和提醒事项名称都是虚构占位符，
@@ -71,7 +74,7 @@ chmod 600 ~/.config/personal-activity-mcp/config.toml
 
 ```toml
 # 可省略。省略后使用相同的默认本地路径。
-sidecar_path = "~/Library/Application Support/personal-activity-mcp/personal_activity.sqlite3"
+sidecar_path = "~/Library/Application Support/pamcp/personal_activity.sqlite3"
 
 # 使用 IANA 时区名称，例如 UTC、Asia/Shanghai 或 Europe/London。
 default_timezone = "UTC"
@@ -138,12 +141,12 @@ allow_write = false
 ```json
 {
   "mcpServers": {
-    "personal-activity": {
+    "pamcp": {
       "command": "uvx",
       "args": [
-        "personal-activity-mcp",
+        "pamcp",
         "--config",
-        "~/.config/personal-activity-mcp/config.toml"
+        "~/.config/pamcp/config.toml"
       ]
     }
   }
@@ -151,7 +154,7 @@ allow_write = false
 ```
 
 如果已经通过 `pip` 安装，请将 `command` 改为该 Python 环境中
-`personal-activity-mcp` 可执行文件的路径，并保留 `--config` 参数。
+`pamcp` 可执行文件的路径，并保留 `--config` 参数。
 
 ## 可用的 MCP 能力
 
@@ -189,7 +192,7 @@ Prompt：
 确认配置文件位于默认路径，或显式传入：
 
 ```bash
-personal-activity-mcp --config ~/.config/personal-activity-mcp/config.toml
+pamcp --config ~/.config/pamcp/config.toml
 ```
 
 ### 读取结果为空
