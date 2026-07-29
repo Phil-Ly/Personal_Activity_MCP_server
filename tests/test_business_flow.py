@@ -3,7 +3,7 @@ from pathlib import Path
 
 import anyio
 
-from personal_activity_mcp.calendar import CalendarEventRecord
+from personal_activity_mcp.calendar import CalendarContainerRecord, CalendarEventRecord
 from personal_activity_mcp.server import create_server
 
 
@@ -21,6 +21,29 @@ class FlowCalendarBackend:
         )
         self.events = {(seed.calendar_id, seed.event_id): seed}
         self.create_calls = 0
+        self.calendar = CalendarContainerRecord(
+            calendar_id="Personal",
+            source_id="source-icloud",
+            source_title="iCloud",
+            title="Personal",
+            color="#3366CC",
+            calendar_type="caldav",
+            allows_content_modifications=True,
+            is_immutable=False,
+            is_subscribed=False,
+        )
+
+    def list_calendars(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[CalendarContainerRecord]:
+        return [self.calendar] if self.calendar.source_id in source_ids else []
+
+    def get_calendar(self, *, calendar_id: str) -> CalendarContainerRecord:
+        if calendar_id != self.calendar.calendar_id:
+            raise KeyError(calendar_id)
+        return self.calendar
 
     def list_events(
         self,
@@ -74,10 +97,11 @@ def write_config(path: Path) -> None:
 sidecar_path = "{sidecar_path}"
 default_timezone = "Asia/Shanghai"
 
-[[calendar_sources]]
-calendar_id = "Personal"
-title = "Personal"
-allow_write = true
+[[eventkit_sources]]
+source_id = "source-icloud"
+title = "iCloud"
+allow_calendar_write = true
+default_calendar_source = true
 """.strip(),
         encoding="utf-8",
     )

@@ -11,6 +11,7 @@ from personal_activity_mcp.calendar import (
     MacOSCalendarBackend,
 )
 from personal_activity_mcp.common.eventkit import (
+    EventKitCalendarData,
     EventKitClientError,
     EventKitEventData,
 )
@@ -40,6 +41,18 @@ class RecordingEventKitClient:
     def get_event(self, **arguments: object) -> EventKitEventData:
         return self._respond("get_event", arguments)
 
+    def list_calendars(self, **arguments: object) -> list[EventKitCalendarData]:
+        return self._respond("list_calendars", arguments)
+
+    def create_calendar(self, **arguments: object) -> EventKitCalendarData:
+        return self._respond("create_calendar", arguments)
+
+    def update_calendar(self, **arguments: object) -> EventKitCalendarData:
+        return self._respond("update_calendar", arguments)
+
+    def get_calendar(self, **arguments: object) -> EventKitCalendarData:
+        return self._respond("get_calendar", arguments)
+
 
 def event_data(*, notes: str | None = "Existing notes") -> EventKitEventData:
     return EventKitEventData(
@@ -54,6 +67,52 @@ def event_data(*, notes: str | None = "Existing notes") -> EventKitEventData:
         location="Office",
         notes=notes,
     )
+
+
+def calendar_data() -> EventKitCalendarData:
+    return EventKitCalendarData(
+        calendar_id="calendar-1",
+        source_id="source-icloud",
+        source_title="iCloud",
+        title="Plan",
+        color="#3366CC",
+        calendar_type="caldav",
+        allows_content_modifications=True,
+        is_immutable=False,
+        is_subscribed=False,
+    )
+
+
+def test_calendar_container_methods_preserve_native_identity_and_record_shape() -> None:
+    client = RecordingEventKitClient(
+        [[calendar_data()], calendar_data(), calendar_data(), calendar_data()]
+    )
+    backend = MacOSCalendarBackend(client=client)
+
+    listed = backend.list_calendars(source_ids=["source-icloud"])
+    created = backend.create_calendar(
+        source_id="source-icloud",
+        title="Plan",
+        color="#3366CC",
+    )
+    updated = backend.update_calendar(
+        calendar_id="calendar-1",
+        title="Plan",
+        color="#3366CC",
+    )
+    fetched = backend.get_calendar(calendar_id="calendar-1")
+
+    assert [operation for operation, _ in client.calls] == [
+        "list_calendars",
+        "create_calendar",
+        "update_calendar",
+        "get_calendar",
+    ]
+    assert client.calls[0][1] == {"source_ids": ["source-icloud"]}
+    assert listed[0].calendar_id == "calendar-1"
+    assert created.source_id == "source-icloud"
+    assert updated.color == "#3366CC"
+    assert fetched.calendar_type == "caldav"
 
 
 def test_list_events_preserves_backend_contract_and_record_shape() -> None:

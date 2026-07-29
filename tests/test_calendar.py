@@ -6,13 +6,14 @@ import pytest
 
 from personal_activity_mcp.calendar import (
     CalendarBackendError,
+    CalendarContainerRecord,
     CalendarEventRecord,
     CalendarRepository,
     DescriptionUpdate,
 )
 from personal_activity_mcp.calendar import repository as calendar_repository
 from personal_activity_mcp.common import TargetRef, ToolContractError
-from personal_activity_mcp.config import AppConfig, CalendarSource
+from personal_activity_mcp.config import AppConfig, EventKitSource
 from personal_activity_mcp.sidecar import SidecarRepository
 
 
@@ -32,6 +33,42 @@ class FakeCalendarBackend:
         self.get_calls: list[dict[str, str]] = []
         self.update_calls: list[dict[str, object]] = []
         self.next_created_event_id = "created-event-1"
+        self.calendars = {
+            "Personal": CalendarContainerRecord(
+                calendar_id="Personal",
+                source_id="source-icloud",
+                source_title="iCloud",
+                title="Personal",
+                color="#3366CC",
+                calendar_type="caldav",
+                allows_content_modifications=True,
+                is_immutable=False,
+                is_subscribed=False,
+            ),
+            "Work": CalendarContainerRecord(
+                calendar_id="Work",
+                source_id="source-exchange",
+                source_title="Exchange",
+                title="Work",
+                color="#CC6633",
+                calendar_type="exchange",
+                allows_content_modifications=True,
+                is_immutable=False,
+                is_subscribed=False,
+            ),
+        }
+
+    def list_calendars(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[CalendarContainerRecord]:
+        return [
+            calendar for calendar in self.calendars.values() if calendar.source_id in source_ids
+        ]
+
+    def get_calendar(self, *, calendar_id: str) -> CalendarContainerRecord:
+        return self.calendars[calendar_id]
 
     def list_events(
         self,
@@ -175,9 +212,19 @@ class FakeCalendarBackend:
 def make_config(tmp_path: Path) -> AppConfig:
     return AppConfig(
         sidecar_path=tmp_path / "sidecar.sqlite3",
-        calendar_sources=(
-            CalendarSource("Personal", "Personal", True),
-            CalendarSource("Work", "Work", False),
+        eventkit_sources=(
+            EventKitSource(
+                "source-icloud",
+                "iCloud",
+                True,
+                True,
+            ),
+            EventKitSource(
+                "source-exchange",
+                "Exchange",
+                False,
+                False,
+            ),
         ),
         default_timezone="Asia/Shanghai",
     )

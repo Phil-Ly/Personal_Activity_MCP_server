@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from personal_activity_mcp.calendar.models import (
     AllDayEventRange,
+    CalendarContainerRecord,
     CalendarCreateResult,
     CalendarEventEvidence,
     CalendarEventRecord,
@@ -56,6 +57,18 @@ class CalendarBackend(Protocol):
         include_location: bool,
     ) -> list[CalendarEventRecord]: ...
 
+    def list_calendars(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[CalendarContainerRecord]: ...
+
+    def get_calendar(
+        self,
+        *,
+        calendar_id: str,
+    ) -> CalendarContainerRecord: ...
+
     def create_event(
         self,
         *,
@@ -86,7 +99,7 @@ class CalendarBackend(Protocol):
 
 
 class CalendarRepository:
-    """Read and write configured Apple Calendars."""
+    """Read and write events in authorized EventKit Calendar Sources."""
 
     def __init__(
         self,
@@ -96,7 +109,7 @@ class CalendarRepository:
         *,
         clock: Clock | None = None,
     ) -> None:
-        self._calendar_sources = {source.calendar_id: source for source in config.calendar_sources}
+        self._eventkit_sources = {source.source_id: source for source in config.eventkit_sources}
         self._backend = backend
         self._sidecar = sidecar
         self._write_control = WriteControl(sidecar) if sidecar is not None else None
@@ -113,7 +126,7 @@ class CalendarRepository:
         limit: int = 100,
         cursor: str | None = None,
     ) -> CalendarListResult:
-        """List event evidence from explicitly configured Calendars."""
+        """List event evidence from Calendars in authorized EventKit Sources."""
         require_aware_datetime(start, "start")
         require_aware_datetime(end, "end")
         if start >= end:
@@ -173,10 +186,8 @@ class CalendarRepository:
         idempotency_key: str,
     ) -> CalendarCreateResult:
         """Create a Calendar event with allowlist, idempotency, and audit controls."""
-        source = self._calendar_sources.get(calendar_id)
-        if source is None:
-            raise ValueError(f"Unknown calendar_ids: {calendar_id}")
-        if not source.allow_write:
+        source = self._calendar_source(calendar_id)
+        if not source.allow_calendar_write:
             raise ValueError(f"Calendar is not allowed for writes: {calendar_id}")
         if self._sidecar is None:
             raise ValueError("sidecar is required for calendar.create_event")
@@ -324,10 +335,8 @@ class CalendarRepository:
             raise ValueError("target_ref must identify one calendar_event and Calendar")
         calendar_id = target_ref.container_id
         event_id = target_ref.item_id
-        source = self._calendar_sources.get(calendar_id)
-        if source is None:
-            raise ValueError(f"Unknown calendar_ids: {calendar_id}")
-        if not source.allow_write:
+        source = self._calendar_source(calendar_id)
+        if not source.allow_calendar_write:
             raise ValueError(f"Calendar is not allowed for writes: {calendar_id}")
         if self._sidecar is None:
             raise ValueError("sidecar is required for calendar.update_event")
@@ -504,11 +513,39 @@ class CalendarRepository:
 
     def _select_calendar_ids(self, calendar_ids: list[str] | None) -> list[str]:
         if calendar_ids is None:
-            return list(self._calendar_sources)
-        unknown = sorted(set(calendar_ids) - self._calendar_sources.keys())
+            records = self._backend.list_calendars(source_ids=list(self._eventkit_sources))
+            return list(
+                dict.fromkeys(
+                    record.calendar_id
+                    for record in records
+                    if record.source_id in self._eventkit_sources
+                )
+            )
+        selected: list[str] = []
+        unknown: list[str] = []
+        for calendar_id in dict.fromkeys(calendar_ids):
+            try:
+                record = self._backend.get_calendar(calendar_id=calendar_id)
+            except Exception:
+                unknown.append(calendar_id)
+                continue
+            if record.source_id not in self._eventkit_sources:
+                unknown.append(calendar_id)
+                continue
+            selected.append(calendar_id)
         if unknown:
-            raise ValueError(f"Unknown calendar_ids: {', '.join(unknown)}")
-        return calendar_ids
+            raise ValueError(f"Unknown calendar_ids: {', '.join(sorted(unknown))}")
+        return selected
+
+    def _calendar_source(self, calendar_id: str):
+        try:
+            record = self._backend.get_calendar(calendar_id=calendar_id)
+        except Exception as error:
+            raise ValueError(f"Unknown calendar_ids: {calendar_id}") from error
+        source = self._eventkit_sources.get(record.source_id)
+        if source is None:
+            raise ValueError(f"Unknown calendar_ids: {calendar_id}")
+        return source
 
     def _to_evidence(
         self,

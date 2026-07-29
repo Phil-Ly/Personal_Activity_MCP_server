@@ -64,6 +64,60 @@ class CalendarEventRecord(BaseModel):
     notes: str | None = None
 
 
+class CalendarContainerRecord(BaseModel):
+    """Raw Calendar container returned by a Calendar backend."""
+
+    calendar_id: str
+    source_id: str
+    source_title: str
+    title: str
+    color: str | None
+    calendar_type: Literal[
+        "local",
+        "caldav",
+        "exchange",
+        "subscription",
+        "birthday",
+        "unknown",
+    ]
+    allows_content_modifications: bool
+    is_immutable: bool
+    is_subscribed: bool
+
+
+class CalendarContainer(CalendarContainerRecord):
+    """Calendar container returned through an MCP Tool."""
+
+    state_token: str
+    created_by_mcp: bool
+
+
+class CalendarContainerListResult(BaseModel):
+    """Paginated Calendar container query result."""
+
+    calendars: list[CalendarContainer]
+    next_cursor: str | None = None
+
+
+class CalendarContainerCreateResult(BaseModel):
+    """Calendar container create result."""
+
+    calendar: CalendarContainer
+    created: bool
+    deduplicated: bool
+    audit_id: str
+
+
+class CalendarContainerUpdateResult(BaseModel):
+    """Calendar container update result."""
+
+    calendar: CalendarContainer
+    updated: bool
+    deduplicated: bool
+    updated_fields: list[Literal["title", "color"]]
+    audit_id: str
+
+
 class CalendarEventEvidence(BaseModel):
     """Calendar event evidence returned through an MCP Tool."""
 

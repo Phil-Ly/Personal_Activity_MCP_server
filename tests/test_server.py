@@ -4,16 +4,99 @@ import anyio
 import pytest
 
 from personal_activity_mcp import server as server_module
-from personal_activity_mcp.calendar import CalendarEventRecord, DescriptionUpdate
+from personal_activity_mcp.calendar import (
+    CalendarContainerRecord,
+    CalendarEventRecord,
+    DescriptionUpdate,
+)
 from personal_activity_mcp.reminders import ReminderRecord
 from personal_activity_mcp.server import create_server, main
 
 
 class FakeCalendarBackend:
     def __init__(self) -> None:
+        self.calendars: dict[str, CalendarContainerRecord] = {
+            "Personal": CalendarContainerRecord(
+                calendar_id="Personal",
+                source_id="source-icloud",
+                source_title="iCloud",
+                title="Personal",
+                color="#3366CC",
+                calendar_type="caldav",
+                allows_content_modifications=True,
+                is_immutable=False,
+                is_subscribed=False,
+            )
+        }
+        self.created_calendars: list[dict[str, object]] = []
+        self.updated_calendars: list[dict[str, object]] = []
         self.created_events: list[dict[str, object]] = []
         self.updated_events: list[dict[str, object]] = []
         self.events: dict[tuple[str, str], CalendarEventRecord] = {}
+
+    def list_calendars(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[CalendarContainerRecord]:
+        return [
+            calendar for calendar in self.calendars.values() if calendar.source_id in source_ids
+        ]
+
+    def get_calendar(self, *, calendar_id: str) -> CalendarContainerRecord:
+        return self.calendars[calendar_id]
+
+    def create_calendar(
+        self,
+        *,
+        source_id: str,
+        title: str,
+        color: str | None,
+    ) -> CalendarContainerRecord:
+        self.created_calendars.append(
+            {
+                "source_id": source_id,
+                "title": title,
+                "color": color,
+            }
+        )
+        record = CalendarContainerRecord(
+            calendar_id=f"created-calendar-{len(self.created_calendars)}",
+            source_id=source_id,
+            source_title="iCloud",
+            title=title,
+            color=color or "#3366CC",
+            calendar_type="caldav",
+            allows_content_modifications=True,
+            is_immutable=False,
+            is_subscribed=False,
+        )
+        self.calendars[record.calendar_id] = record
+        return record
+
+    def update_calendar(
+        self,
+        *,
+        calendar_id: str,
+        title: str | None,
+        color: str | None,
+    ) -> CalendarContainerRecord:
+        self.updated_calendars.append(
+            {
+                "calendar_id": calendar_id,
+                "title": title,
+                "color": color,
+            }
+        )
+        current = self.calendars[calendar_id]
+        record = current.model_copy(
+            update={
+                "title": title if title is not None else current.title,
+                "color": color if color is not None else current.color,
+            }
+        )
+        self.calendars[calendar_id] = record
+        return record
 
     def list_events(
         self,
@@ -207,10 +290,11 @@ def write_config_with_calendar(config_path: Path, sidecar_path: Path) -> None:
 sidecar_path = "{sidecar_path}"
 default_timezone = "Asia/Shanghai"
 
-[[calendar_sources]]
-calendar_id = "Personal"
-title = "Personal"
-allow_write = true
+[[eventkit_sources]]
+source_id = "source-icloud"
+title = "iCloud"
+allow_calendar_write = true
+default_calendar_source = true
 """.strip(),
         encoding="utf-8",
     )
@@ -271,6 +355,9 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
 
     assert server.name == "PAMCP"
     assert [tool.name for tool in tools] == [
+        "calendar.list_calendars",
+        "calendar.create_calendar",
+        "calendar.update_calendar",
         "calendar.list_events",
         "calendar.create_event",
         "calendar.update_event",
@@ -298,6 +385,18 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
         "confirmed_by_user",
         "idempotency_key",
     }
+    calendar_create = next(tool for tool in tools if tool.name == "calendar.create_calendar")
+    assert set(calendar_create.inputSchema["required"]) == {
+        "title",
+        "idempotency_key",
+    }
+    calendar_update_container = next(
+        tool for tool in tools if tool.name == "calendar.update_calendar"
+    )
+    assert set(calendar_update_container.inputSchema["required"]) == {
+        "calendar_id",
+        "idempotency_key",
+    }
 
 
 def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path) -> None:
@@ -307,6 +406,29 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
     backend = FakeCalendarBackend()
     server = create_server(config_path, calendar_backend=backend)
 
+    _, container_list_result = anyio.run(
+        server.call_tool,
+        "calendar.list_calendars",
+        {},
+    )
+    _, container_create_result = anyio.run(
+        server.call_tool,
+        "calendar.create_calendar",
+        {
+            "title": "Japanese Plan",
+            "color": "#3366CC",
+            "idempotency_key": "calendar:create-container:demo",
+        },
+    )
+    _, container_update_result = anyio.run(
+        server.call_tool,
+        "calendar.update_calendar",
+        {
+            "calendar_id": "created-calendar-1",
+            "title": "Japanese Plan 2026",
+            "idempotency_key": "calendar:update-container:demo",
+        },
+    )
     _, list_result = anyio.run(
         server.call_tool,
         "calendar.list_events",
@@ -352,6 +474,11 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
             "idempotency_key": "calendar:update:demo",
         },
     )
+    assert container_list_result["calendars"][0]["calendar_id"] == "Personal"
+    assert container_create_result["calendar"]["calendar_id"] == "created-calendar-1"
+    assert container_create_result["created"] is True
+    assert container_update_result["calendar"]["title"] == "Japanese Plan 2026"
+    assert container_update_result["updated"] is True
     assert list_result["events"][0]["event_id"] == "event-1"
     assert list_result["events"][0]["notes"] is None
     assert create_result["event_id"] == "created-event-1"
@@ -360,6 +487,8 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
     assert update_result["updated"] is True
     assert len(backend.created_events) == 1
     assert len(backend.updated_events) == 1
+    assert len(backend.created_calendars) == 1
+    assert len(backend.updated_calendars) == 1
 
 
 def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path) -> None:

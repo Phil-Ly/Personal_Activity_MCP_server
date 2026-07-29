@@ -1,5 +1,5 @@
 # Copy this file outside the repository or to a local ignored path.
-# Calendar and Reminder sources grant access only to the configured allowlists.
+# EventKit account Sources and Reminder lists grant access only to configured scopes.
 # Local activity files are read by the Agent and are not configured in this server.
 
 # Optional. The loader uses this same repository-external path when omitted.
@@ -25,16 +25,12 @@ allow_delete_operations = false
 require_confirmation_for_event_completion_updates = true
 require_confirmation_for_reminder_completion = true
 
-[[calendar_sources]]
-# In the current macOS backend, calendar_id is the Calendar.app calendar name.
-calendar_id = "Personal"
-title = "Personal"
-allow_write = true
-
-[[calendar_sources]]
-calendar_id = "Work"
-title = "Work"
-allow_write = false
+[[eventkit_sources]]
+# Use the native EKSource.sourceIdentifier, never an account display name.
+source_id = "Your EventKit Source ID"
+title = "iCloud"
+allow_calendar_write = true
+default_calendar_source = true
 
 [[reminder_sources]]
 # In the current macOS backend, list_id is the Reminders.app list name.

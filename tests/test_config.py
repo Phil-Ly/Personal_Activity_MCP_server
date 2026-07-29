@@ -15,7 +15,7 @@ def test_load_config_accepts_configuration_without_local_file_sources(tmp_path: 
 
     config = load_config(config_path)
 
-    assert config.calendar_sources == ()
+    assert config.eventkit_sources == ()
     assert config.reminder_sources == ()
     assert (
         config.sidecar_path
@@ -51,33 +51,94 @@ def test_load_config_accepts_explicit_sidecar_path(tmp_path: Path) -> None:
     assert config.sidecar_path == sidecar_path.resolve()
 
 
-def test_load_config_accepts_calendar_allowlist(tmp_path: Path) -> None:
+def test_load_config_accepts_eventkit_source_calendar_policy(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     write_config(
         config_path,
         """
 default_timezone = "Asia/Shanghai"
 
-[[calendar_sources]]
-calendar_id = "Personal"
-title = "Personal"
-allow_write = true
+[[eventkit_sources]]
+source_id = "source-icloud"
+title = "iCloud"
+allow_calendar_write = true
+default_calendar_source = true
 
-[[calendar_sources]]
-calendar_id = "Work"
-title = "Work"
-allow_write = false
+[[eventkit_sources]]
+source_id = "source-exchange"
+title = "Exchange"
+allow_calendar_write = false
 """,
     )
 
     config = load_config(config_path)
 
     assert config.default_timezone == "Asia/Shanghai"
-    assert config.calendar_sources[0].calendar_id == "Personal"
-    assert config.calendar_sources[0].title == "Personal"
-    assert config.calendar_sources[0].allow_write is True
-    assert config.calendar_sources[1].calendar_id == "Work"
-    assert config.calendar_sources[1].allow_write is False
+    assert config.eventkit_sources[0].source_id == "source-icloud"
+    assert config.eventkit_sources[0].title == "iCloud"
+    assert config.eventkit_sources[0].allow_calendar_write is True
+    assert config.eventkit_sources[0].default_calendar_source is True
+    assert config.eventkit_sources[1].source_id == "source-exchange"
+    assert config.eventkit_sources[1].allow_calendar_write is False
+    assert config.eventkit_sources[1].default_calendar_source is False
+
+
+def test_load_config_rejects_legacy_calendar_container_allowlist(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        """
+[[calendar_sources]]
+calendar_id = "Personal"
+allow_write = true
+""",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="Unknown configuration keys: calendar_sources",
+    ):
+        load_config(config_path)
+
+
+def test_load_config_rejects_multiple_default_calendar_sources(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        """
+[[eventkit_sources]]
+source_id = "source-icloud"
+allow_calendar_write = true
+default_calendar_source = true
+
+[[eventkit_sources]]
+source_id = "source-local"
+allow_calendar_write = true
+default_calendar_source = true
+""",
+    )
+
+    with pytest.raises(ConfigError, match="Only one default Calendar EventKit Source"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_read_only_default_calendar_source(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        """
+[[eventkit_sources]]
+source_id = "source-exchange"
+allow_calendar_write = false
+default_calendar_source = true
+""",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="Default Calendar EventKit Source must allow Calendar writes",
+    ):
+        load_config(config_path)
 
 
 def test_load_config_rejects_unknown_default_timezone(tmp_path: Path) -> None:
@@ -251,15 +312,15 @@ def test_load_config_rejects_unknown_source_keys(tmp_path: Path) -> None:
     write_config(
         config_path,
         """
-[[calendar_sources]]
-calendar_id = "Personal"
+[[eventkit_sources]]
+source_id = "source-icloud"
 filesystem_path = "/tmp/calendar"
 """,
     )
 
     with pytest.raises(
         ConfigError,
-        match="Unknown calendar source keys: filesystem_path",
+        match="Unknown EventKit source keys: filesystem_path",
     ):
         load_config(config_path)
 
@@ -267,7 +328,7 @@ filesystem_path = "/tmp/calendar"
 @pytest.mark.parametrize(
     ("section", "identifier_field"),
     [
-        ("calendar_sources", "calendar_id"),
+        ("eventkit_sources", "source_id"),
         ("reminder_sources", "list_id"),
     ],
 )
@@ -320,20 +381,20 @@ list_id = "Personal"
         load_config(config_path)
 
 
-def test_load_config_rejects_duplicate_calendar_ids(tmp_path: Path) -> None:
+def test_load_config_rejects_duplicate_eventkit_source_ids(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     write_config(
         config_path,
         """
-[[calendar_sources]]
-calendar_id = "Personal"
+[[eventkit_sources]]
+source_id = "source-icloud"
 
-[[calendar_sources]]
-calendar_id = "Personal"
+[[eventkit_sources]]
+source_id = "source-icloud"
 """,
     )
 
-    with pytest.raises(ConfigError, match="Duplicate calendar_id: Personal"):
+    with pytest.raises(ConfigError, match="Duplicate EventKit source_id: source-icloud"):
         load_config(config_path)
 
 

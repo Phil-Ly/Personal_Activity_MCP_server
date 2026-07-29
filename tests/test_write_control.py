@@ -32,6 +32,43 @@ def item_write() -> McpItemWrite:
     )
 
 
+def calendar_container_write() -> McpItemWrite:
+    return McpItemWrite(
+        item_id="calendar:container-1",
+        item_type="calendar",
+        external_id="calendar-1",
+        external_container_id="source-icloud",
+        status_semantics=None,
+        created_by_mcp=True,
+        completion_status=None,
+    )
+
+
+def test_calendar_container_rejects_event_status_semantics() -> None:
+    with pytest.raises(ValueError, match="status_semantics is not valid for calendar"):
+        calendar_container_write().model_copy(
+            update={"status_semantics": "planned"}
+        ).model_validate(
+            {
+                **calendar_container_write().model_dump(),
+                "status_semantics": "planned",
+            }
+        )
+
+
+def test_calendar_event_requires_status_semantics() -> None:
+    with pytest.raises(ValueError, match="status_semantics is required"):
+        McpItemWrite(
+            item_id="calendar:event-1",
+            item_type="calendar_event",
+            external_id="event-1",
+            external_container_id="calendar-1",
+            status_semantics=None,
+            created_by_mcp=True,
+            completion_status="unknown",
+        )
+
+
 def audit_write(result_status: str = "succeeded") -> AuditWrite:
     return AuditWrite(
         request_hash="request-hash",
@@ -179,6 +216,40 @@ def test_finalize_success_commits_compact_item_idempotency_and_audit_together(
     assert idempotency["audit_id"] == audit.audit_id
     assert stored_audit["id"] == audit.audit_id
     assert stored_audit["result_status"] == "succeeded"
+
+
+def test_finalize_success_commits_calendar_container_idempotency_and_audit(
+    tmp_path: Path,
+) -> None:
+    repository, control = make_control(tmp_path)
+    control.reserve_operation(
+        idempotency_key="calendar:create-container:1",
+        operation="calendar.create_calendar",
+        request_hash="request-hash",
+    )
+    audit = audit_write()
+
+    control.finalize_success(
+        idempotency_key="calendar:create-container:1",
+        operation="calendar.create_calendar",
+        item=calendar_container_write(),
+        source_refs=[],
+        audit=audit,
+    )
+
+    item = repository.get_mcp_item("calendar:container-1")
+    result = control.get_operation_result(
+        idempotency_key="calendar:create-container:1",
+        operation="calendar.create_calendar",
+    )
+    assert item is not None
+    assert item["item_type"] == "calendar"
+    assert item["status_semantics"] is None
+    assert item["completion_status"] is None
+    assert result is not None
+    assert result.status == "succeeded"
+    assert result.result_item_id == "calendar:container-1"
+    assert result.audit_id == audit.audit_id
 
 
 def test_finalize_success_rolls_back_partial_rows_and_marks_unknown(

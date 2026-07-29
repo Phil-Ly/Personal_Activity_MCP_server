@@ -114,16 +114,134 @@ FAKE_FOUNDATION = SimpleNamespace(
 )
 
 
-class FakeCalendar:
+class FakeNSColor:
+    def __init__(self, red: float, green: float, blue: float, alpha: float) -> None:
+        self.red = red
+        self.green = green
+        self.blue = blue
+        self.alpha = alpha
+
+    @classmethod
+    def colorWithSRGBRed_green_blue_alpha_(
+        cls,
+        red: float,
+        green: float,
+        blue: float,
+        alpha: float,
+    ) -> FakeNSColor:
+        return cls(red, green, blue, alpha)
+
+    def colorUsingColorSpace_(self, color_space: object) -> FakeNSColor:
+        del color_space
+        return self
+
+    def redComponent(self) -> float:
+        return self.red
+
+    def greenComponent(self) -> float:
+        return self.green
+
+    def blueComponent(self) -> float:
+        return self.blue
+
+
+class FakeNSColorSpace:
+    @classmethod
+    def sRGBColorSpace(cls) -> str:
+        return "srgb"
+
+
+FAKE_APPKIT = SimpleNamespace(
+    NSColor=FakeNSColor,
+    NSColorSpace=FakeNSColorSpace,
+)
+
+
+class FakeSource:
     def __init__(self, identifier: str, title: str) -> None:
         self.identifier = identifier
-        self.calendar_title = title
+        self.source_title = title
 
-    def calendarIdentifier(self) -> str:
+    def sourceIdentifier(self) -> str:
+        return self.identifier
+
+    def title(self) -> str:
+        return self.source_title
+
+
+class FakeCalendar:
+    def __init__(
+        self,
+        identifier: str | None,
+        title: str,
+        *,
+        source: FakeSource | None = None,
+        color: FakeNSColor | None = None,
+        calendar_type: int = 1,
+        allows_content_modifications: bool = True,
+        immutable: bool = False,
+        subscribed: bool = False,
+        allowed_entity_types: int = 1,
+    ) -> None:
+        self.identifier = identifier
+        self.calendar_title = title
+        self.calendar_source = source or FakeSource("source-default", "Default")
+        self.calendar_color = color or FakeNSColor(0.2, 0.4, 0.6, 1.0)
+        self.calendar_type = calendar_type
+        self.modifiable = allows_content_modifications
+        self.immutable = immutable
+        self.subscribed = subscribed
+        self.entity_mask = allowed_entity_types
+
+    @classmethod
+    def calendarForEntityType_eventStore_(
+        cls,
+        entity_type: int,
+        store: FakeStore,
+    ) -> FakeCalendar:
+        calendar = cls(
+            None,
+            "",
+            allowed_entity_types=1 if entity_type == 0 else 2,
+        )
+        store.created_calendar = calendar
+        return calendar
+
+    def calendarIdentifier(self) -> str | None:
         return self.identifier
 
     def title(self) -> str:
         return self.calendar_title
+
+    def setTitle_(self, title: str) -> None:
+        self.calendar_title = title
+
+    def source(self) -> FakeSource:
+        return self.calendar_source
+
+    def setSource_(self, source: FakeSource) -> None:
+        self.calendar_source = source
+
+    def color(self) -> FakeNSColor:
+        return self.calendar_color
+
+    def setColor_(self, color: FakeNSColor) -> None:
+        self.calendar_color = color
+
+    def type(self) -> int:
+        return self.calendar_type
+
+    def allowsContentModifications(self) -> bool:
+        return self.modifiable
+
+    def isImmutable(self) -> bool:
+        return self.immutable
+
+    def isSubscribed(self) -> bool:
+        return self.subscribed
+
+    def allowedEntityTypes(self) -> int:
+        return self.entity_mask
 
 
 class FakeEvent:
@@ -286,19 +404,29 @@ class FakeStore:
         reminder_calendars: list[FakeCalendar] | None = None,
         events: list[FakeEvent] | None = None,
         reminders: list[FakeReminder] | None = None,
+        sources: list[FakeSource] | None = None,
     ) -> None:
         self.event_calendars = event_calendars or []
         self.reminder_calendars = reminder_calendars or []
         self.events = events or []
         self.reminders = reminders or []
+        derived_sources = {
+            calendar.source().sourceIdentifier(): calendar.source()
+            for calendar in [*self.event_calendars, *self.reminder_calendars]
+        }
+        self.sources = sources or list(derived_sources.values())
         self.created_event: FakeEvent | None = None
         self.created_reminder: FakeReminder | None = None
+        self.created_calendar: FakeCalendar | None = None
         self.saved_events: list[tuple[FakeEvent, int, bool]] = []
         self.saved_reminders: list[tuple[FakeReminder, bool]] = []
+        self.saved_calendars: list[tuple[FakeCalendar, bool]] = []
         self.save_event_result: tuple[bool, object | None] = (True, None)
         self.save_reminder_result: tuple[bool, object | None] = (True, None)
+        self.save_calendar_result: tuple[bool, object | None] = (True, None)
         self.assign_event_identifier_on_save = True
         self.assign_reminder_identifier_on_save = True
+        self.assign_calendar_identifier_on_save = True
         self.event_access_result: tuple[bool, object | None] = (True, None)
         self.reminder_access_result: tuple[bool, object | None] = (True, None)
         self.requested_access: list[str] = []
@@ -315,6 +443,39 @@ class FakeStore:
         if entity_type == 0:
             return self.event_calendars
         return self.reminder_calendars
+
+    def sourceWithIdentifier_(self, source_id: str) -> FakeSource | None:
+        return next(
+            (source for source in self.sources if source.sourceIdentifier() == source_id),
+            None,
+        )
+
+    def calendarWithIdentifier_(self, calendar_id: str) -> FakeCalendar | None:
+        return next(
+            (
+                calendar
+                for calendar in [*self.event_calendars, *self.reminder_calendars]
+                if calendar.calendarIdentifier() == calendar_id
+            ),
+            None,
+        )
+
+    def saveCalendar_commit_error_(
+        self,
+        calendar: FakeCalendar,
+        commit: bool,
+        error: None,
+    ) -> tuple[bool, object | None]:
+        del error
+        self.saved_calendars.append((calendar, commit))
+        if (
+            self.save_calendar_result[0]
+            and self.assign_calendar_identifier_on_save
+            and calendar.calendarIdentifier() is None
+        ):
+            calendar.identifier = "calendar-created"
+            self.event_calendars.append(calendar)
+        return self.save_calendar_result
 
     def predicateForEventsWithStartDate_endDate_calendars_(
         self,
@@ -435,9 +596,16 @@ def _client(
         EKEventStore=FakeEventStoreAPI,
         EKEvent=FakeEvent,
         EKReminder=FakeReminder,
+        EKCalendar=FakeCalendar,
         EKEntityTypeEvent=0,
         EKEntityTypeReminder=1,
+        EKEntityMaskEvent=1,
         EKSpanThisEvent=0,
+        EKCalendarTypeLocal=0,
+        EKCalendarTypeCalDAV=1,
+        EKCalendarTypeExchange=2,
+        EKCalendarTypeSubscription=3,
+        EKCalendarTypeBirthday=4,
         EKAuthorizationStatusNotDetermined=0,
         EKAuthorizationStatusRestricted=1,
         EKAuthorizationStatusDenied=2,
@@ -448,7 +616,133 @@ def _client(
         store=store,
         eventkit_module=eventkit,
         foundation_module=FAKE_FOUNDATION,
+        appkit_module=FAKE_APPKIT,
     )
+
+
+def test_list_calendars_returns_only_requested_native_sources() -> None:
+    icloud = FakeSource("source-icloud", "iCloud")
+    exchange = FakeSource("source-exchange", "Exchange")
+    selected = FakeCalendar(
+        "calendar-1",
+        "Plan",
+        source=icloud,
+        color=FakeNSColor(0.2, 0.4, 0.8, 1.0),
+    )
+    other = FakeCalendar("calendar-2", "Work", source=exchange)
+    store = FakeStore(
+        event_calendars=[selected, other],
+        sources=[icloud, exchange],
+    )
+    client = _client(store)
+
+    records = client.list_calendars(source_ids=["source-icloud"])
+
+    assert len(records) == 1
+    assert records[0].calendar_id == "calendar-1"
+    assert records[0].source_id == "source-icloud"
+    assert records[0].source_title == "iCloud"
+    assert records[0].title == "Plan"
+    assert records[0].color == "#3366CC"
+    assert records[0].calendar_type == "caldav"
+    assert records[0].allows_content_modifications is True
+    assert records[0].is_immutable is False
+    assert records[0].is_subscribed is False
+
+
+def test_get_calendar_rejects_a_reminder_list_entity() -> None:
+    reminder_source = FakeSource("source-icloud", "iCloud")
+    reminder_list = FakeCalendar(
+        "list-1",
+        "Tasks",
+        source=reminder_source,
+        allowed_entity_types=2,
+    )
+    store = FakeStore(
+        reminder_calendars=[reminder_list],
+        sources=[reminder_source],
+    )
+    client = _client(store)
+
+    with pytest.raises(EventKitClientError, match="not an Event Calendar"):
+        client.get_calendar(calendar_id="list-1")
+
+
+def test_create_calendar_sets_source_title_and_color_before_saving() -> None:
+    icloud = FakeSource("source-icloud", "iCloud")
+    store = FakeStore(sources=[icloud])
+    client = _client(store)
+
+    record = client.create_calendar(
+        source_id="source-icloud",
+        title="Japanese plan",
+        color="#3366CC",
+    )
+
+    assert record.calendar_id == "calendar-created"
+    assert record.source_id == "source-icloud"
+    assert record.title == "Japanese plan"
+    assert record.color == "#3366CC"
+    assert store.created_calendar is not None
+    assert store.created_calendar.source() is icloud
+    assert store.saved_calendars == [(store.created_calendar, True)]
+
+
+def test_update_calendar_changes_only_requested_properties_and_keeps_source() -> None:
+    icloud = FakeSource("source-icloud", "iCloud")
+    calendar = FakeCalendar("calendar-1", "Old", source=icloud)
+    store = FakeStore(event_calendars=[calendar], sources=[icloud])
+    client = _client(store)
+
+    record = client.update_calendar(
+        calendar_id="calendar-1",
+        title="New",
+        color="#112233",
+    )
+
+    assert record.title == "New"
+    assert record.color == "#112233"
+    assert calendar.source() is icloud
+    assert store.saved_calendars == [(calendar, True)]
+
+
+def test_update_calendar_rejects_immutable_target_before_save() -> None:
+    calendar = FakeCalendar(
+        "calendar-1",
+        "Read only",
+        immutable=True,
+    )
+    store = FakeStore(event_calendars=[calendar])
+    client = _client(store)
+
+    with pytest.raises(EventKitClientError, match="cannot be modified") as captured:
+        client.update_calendar(
+            calendar_id="calendar-1",
+            title="Changed",
+            color=None,
+        )
+
+    assert captured.value.external_state_changed is False
+    assert store.saved_calendars == []
+
+
+def test_failed_calendar_save_preserves_unknown_external_write_outcome() -> None:
+    icloud = FakeSource("source-icloud", "iCloud")
+    store = FakeStore(sources=[icloud])
+    store.save_calendar_result = (
+        False,
+        SimpleNamespace(localizedDescription=lambda: "calendar save failed"),
+    )
+    client = _client(store)
+
+    with pytest.raises(EventKitClientError, match="calendar save failed") as captured:
+        client.create_calendar(
+            source_id="source-icloud",
+            title="Japanese plan",
+            color=None,
+        )
+
+    assert captured.value.external_state_changed is None
 
 
 def test_denied_access_fails_before_calendar_data_is_read() -> None:

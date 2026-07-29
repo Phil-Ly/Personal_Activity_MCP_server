@@ -5,8 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from personal_activity_mcp.calendar.models import CalendarEventRecord, DescriptionUpdate
+from personal_activity_mcp.calendar.models import (
+    CalendarContainerRecord,
+    CalendarEventRecord,
+    DescriptionUpdate,
+)
 from personal_activity_mcp.common.eventkit import (
+    EventKitCalendarData,
     EventKitClient,
     EventKitClientError,
     EventKitEventData,
@@ -67,6 +72,34 @@ class CalendarEventKitClient(Protocol):
         calendar_id: str,
     ) -> EventKitEventData: ...
 
+    def list_calendars(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[EventKitCalendarData]: ...
+
+    def create_calendar(
+        self,
+        *,
+        source_id: str,
+        title: str,
+        color: str | None,
+    ) -> EventKitCalendarData: ...
+
+    def update_calendar(
+        self,
+        *,
+        calendar_id: str,
+        title: str | None,
+        color: str | None,
+    ) -> EventKitCalendarData: ...
+
+    def get_calendar(
+        self,
+        *,
+        calendar_id: str,
+    ) -> EventKitCalendarData: ...
+
 
 class MacOSCalendarBackend:
     """Read and write Apple Calendar through a shared EventKit client."""
@@ -94,6 +127,62 @@ class MacOSCalendarBackend:
         except EventKitClientError as error:
             raise _backend_error(error) from error
         return [_to_calendar_record(record) for record in records]
+
+    def list_calendars(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[CalendarContainerRecord]:
+        try:
+            records = self._client.list_calendars(source_ids=source_ids)
+        except EventKitClientError as error:
+            raise _backend_error(error) from error
+        return [_to_container_record(record) for record in records]
+
+    def create_calendar(
+        self,
+        *,
+        source_id: str,
+        title: str,
+        color: str | None,
+    ) -> CalendarContainerRecord:
+        try:
+            record = self._client.create_calendar(
+                source_id=source_id,
+                title=title,
+                color=color,
+            )
+        except EventKitClientError as error:
+            raise _backend_error(error) from error
+        return _to_container_record(record)
+
+    def update_calendar(
+        self,
+        *,
+        calendar_id: str,
+        title: str | None,
+        color: str | None,
+    ) -> CalendarContainerRecord:
+        try:
+            record = self._client.update_calendar(
+                calendar_id=calendar_id,
+                title=title,
+                color=color,
+            )
+        except EventKitClientError as error:
+            raise _backend_error(error) from error
+        return _to_container_record(record)
+
+    def get_calendar(
+        self,
+        *,
+        calendar_id: str,
+    ) -> CalendarContainerRecord:
+        try:
+            record = self._client.get_calendar(calendar_id=calendar_id)
+        except EventKitClientError as error:
+            raise _backend_error(error) from error
+        return _to_container_record(record)
 
     def create_event(
         self,
@@ -168,6 +257,20 @@ def _to_calendar_record(record: EventKitEventData) -> CalendarEventRecord:
         end_date=record.end_date,
         location=record.location,
         notes=record.notes,
+    )
+
+
+def _to_container_record(record: EventKitCalendarData) -> CalendarContainerRecord:
+    return CalendarContainerRecord(
+        calendar_id=record.calendar_id,
+        source_id=record.source_id,
+        source_title=record.source_title,
+        title=record.title,
+        color=record.color,
+        calendar_type=record.calendar_type,
+        allows_content_modifications=record.allows_content_modifications,
+        is_immutable=record.is_immutable,
+        is_subscribed=record.is_subscribed,
     )
 
 

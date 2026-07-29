@@ -36,7 +36,7 @@ def test_readme_documents_safe_manual_configuration() -> None:
     readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "~/.config/pamcp/config.toml" in readme
-    assert 'calendar_id = "Your Calendar Name"' in readme
+    assert 'source_id = "Your EventKit Source ID"' in readme
     assert 'list_id = "Your Reminder List Name"' in readme
     assert "allow_write = false" in readme
     assert "/Users/" not in readme

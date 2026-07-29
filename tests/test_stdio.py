@@ -41,6 +41,9 @@ def test_real_stdio_session_exposes_no_local_file_capability(tmp_path: Path) -> 
                 )
 
         assert [tool.name for tool in tools.tools] == [
+            "calendar.list_calendars",
+            "calendar.create_calendar",
+            "calendar.update_calendar",
             "calendar.list_events",
             "calendar.create_event",
             "calendar.update_event",

@@ -14,7 +14,7 @@ from typing import Literal
 
 _EXPECTED_TABLES = {"mcp_item", "idempotency_key", "operation_audit"}
 _APPLICATION_ID = 0x50414D43
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _MAX_TARGETS_PER_QUERY = 400
 
 
@@ -67,12 +67,13 @@ _SCHEMA_STATEMENTS = (
     CREATE TABLE IF NOT EXISTS mcp_item (
         id TEXT PRIMARY KEY,
         item_type TEXT NOT NULL CHECK (
-            item_type IN ('calendar_event', 'reminder')
+            item_type IN ('calendar_event', 'reminder', 'calendar')
         ),
         external_id TEXT NOT NULL,
         external_container_id TEXT NOT NULL,
-        status_semantics TEXT NOT NULL CHECK (
-            status_semantics IN ('planned', 'probable', 'confirmed')
+        status_semantics TEXT CHECK (
+            status_semantics IS NULL
+            OR status_semantics IN ('planned', 'probable', 'confirmed')
         ),
         completion_status TEXT CHECK (
             completion_status IN ('unknown', 'incomplete', 'completed')
@@ -84,12 +85,23 @@ _SCHEMA_STATEMENTS = (
         UNIQUE (item_type, external_id, external_container_id),
         CHECK (
             (
+                item_type IN ('calendar_event', 'reminder')
+                AND status_semantics IS NOT NULL
+            )
+            OR
+            (
+                item_type = 'calendar'
+                AND status_semantics IS NULL
+            )
+        ),
+        CHECK (
+            (
                 item_type = 'calendar_event'
                 AND completion_status IS NOT NULL
             )
             OR
             (
-                item_type = 'reminder'
+                item_type IN ('reminder', 'calendar')
                 AND completion_status IS NULL
             )
         )

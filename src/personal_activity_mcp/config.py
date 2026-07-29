@@ -17,12 +17,13 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
-class CalendarSource:
-    """A single explicitly authorized Apple Calendar."""
+class EventKitSource:
+    """One explicitly authorized native EventKit account source."""
 
-    calendar_id: str
+    source_id: str
     title: str
-    allow_write: bool
+    allow_calendar_write: bool
+    default_calendar_source: bool
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,7 @@ class AppConfig:
     """Validated application configuration."""
 
     sidecar_path: Path = DEFAULT_SIDECAR_PATH
-    calendar_sources: tuple[CalendarSource, ...] = ()
+    eventkit_sources: tuple[EventKitSource, ...] = ()
     reminder_sources: tuple[ReminderSource, ...] = ()
     default_timezone: str = "UTC"
     privacy: PrivacyConfig = PrivacyConfig()
@@ -82,7 +83,7 @@ def load_config(config_path: Path) -> AppConfig:
         raw,
         {
             "sidecar_path",
-            "calendar_sources",
+            "eventkit_sources",
             "reminder_sources",
             "default_timezone",
             "privacy",
@@ -93,7 +94,7 @@ def load_config(config_path: Path) -> AppConfig:
 
     return AppConfig(
         sidecar_path=_parse_sidecar_path(raw.get("sidecar_path")),
-        calendar_sources=_parse_calendar_sources(raw.get("calendar_sources")),
+        eventkit_sources=_parse_eventkit_sources(raw.get("eventkit_sources")),
         reminder_sources=_parse_reminder_sources(raw.get("reminder_sources")),
         default_timezone=_parse_default_timezone(raw.get("default_timezone")),
         privacy=_parse_privacy_config(raw.get("privacy")),
@@ -231,49 +232,62 @@ def _reject_unknown_keys(
         raise ConfigError(f"Unknown {section_name} keys: {', '.join(unknown_keys)}")
 
 
-def _parse_calendar_sources(raw_sources: object) -> tuple[CalendarSource, ...]:
+def _parse_eventkit_sources(raw_sources: object) -> tuple[EventKitSource, ...]:
     if raw_sources is None:
         return ()
     if not isinstance(raw_sources, list):
-        raise ConfigError("calendar_sources must be a list")
+        raise ConfigError("eventkit_sources must be a list")
 
-    sources: list[CalendarSource] = []
+    sources: list[EventKitSource] = []
     seen_ids: set[str] = set()
     for raw_source in raw_sources:
-        source = _parse_calendar_source(raw_source)
-        if source.calendar_id in seen_ids:
-            raise ConfigError(f"Duplicate calendar_id: {source.calendar_id}")
-        seen_ids.add(source.calendar_id)
+        source = _parse_eventkit_source(raw_source)
+        if source.source_id in seen_ids:
+            raise ConfigError(f"Duplicate EventKit source_id: {source.source_id}")
+        seen_ids.add(source.source_id)
         sources.append(source)
+    if sum(source.default_calendar_source for source in sources) > 1:
+        raise ConfigError("Only one default Calendar EventKit Source may be configured")
     return tuple(sources)
 
 
-def _parse_calendar_source(raw_source: object) -> CalendarSource:
+def _parse_eventkit_source(raw_source: object) -> EventKitSource:
     if not isinstance(raw_source, dict):
-        raise ConfigError("Each calendar_sources entry must be a TOML table")
+        raise ConfigError("Each eventkit_sources entry must be a TOML table")
     _reject_unknown_keys(
         raw_source,
-        {"calendar_id", "title", "allow_write"},
-        "calendar source",
+        {
+            "source_id",
+            "title",
+            "allow_calendar_write",
+            "default_calendar_source",
+        },
+        "EventKit source",
     )
 
-    calendar_id = raw_source.get("calendar_id")
-    if not isinstance(calendar_id, str) or not calendar_id.strip():
-        raise ConfigError("Calendar calendar_id must be a non-empty string")
-    _reject_control_characters(calendar_id, "Calendar calendar_id")
+    source_id = raw_source.get("source_id")
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise ConfigError("EventKit source_id must be a non-empty string")
+    _reject_control_characters(source_id, "EventKit source_id")
 
-    title = raw_source.get("title", calendar_id)
+    title = raw_source.get("title", source_id)
     if not isinstance(title, str) or not title.strip():
-        raise ConfigError(f"Calendar title must be a non-empty string: {calendar_id}")
+        raise ConfigError(f"EventKit Source title must be a non-empty string: {source_id}")
 
-    allow_write = raw_source.get("allow_write", False)
-    if not isinstance(allow_write, bool):
-        raise ConfigError(f"Calendar allow_write must be a boolean: {calendar_id}")
+    allow_calendar_write = raw_source.get("allow_calendar_write", False)
+    if not isinstance(allow_calendar_write, bool):
+        raise ConfigError(f"EventKit Source allow_calendar_write must be a boolean: {source_id}")
+    default_calendar_source = raw_source.get("default_calendar_source", False)
+    if not isinstance(default_calendar_source, bool):
+        raise ConfigError(f"EventKit Source default_calendar_source must be a boolean: {source_id}")
+    if default_calendar_source and not allow_calendar_write:
+        raise ConfigError("Default Calendar EventKit Source must allow Calendar writes")
 
-    return CalendarSource(
-        calendar_id=calendar_id.strip(),
+    return EventKitSource(
+        source_id=source_id.strip(),
         title=title.strip(),
-        allow_write=allow_write,
+        allow_calendar_write=allow_calendar_write,
+        default_calendar_source=default_calendar_source,
     )
 
 

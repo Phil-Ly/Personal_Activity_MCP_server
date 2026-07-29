@@ -50,6 +50,21 @@ class EventKitReminderData:
     completion_date: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class EventKitCalendarData:
+    """Python representation of one EventKit Calendar container."""
+
+    calendar_id: str
+    source_id: str
+    source_title: str
+    title: str
+    color: str | None
+    calendar_type: str
+    allows_content_modifications: bool
+    is_immutable: bool
+    is_subscribed: bool
+
+
 class EventKitClient:
     """Use one native Event Store for Calendar and Reminders operations."""
 
@@ -59,19 +74,117 @@ class EventKitClient:
         store: object | None = None,
         eventkit_module: object | None = None,
         foundation_module: object | None = None,
+        appkit_module: object | None = None,
         permission_timeout: float = 30,
         reminder_fetch_timeout: float = 30,
     ) -> None:
-        if eventkit_module is None or foundation_module is None:
-            loaded_eventkit, loaded_foundation = _load_eventkit_modules()
+        if eventkit_module is None or foundation_module is None or appkit_module is None:
+            loaded_eventkit, loaded_foundation, loaded_appkit = _load_eventkit_modules()
             eventkit_module = eventkit_module or loaded_eventkit
             foundation_module = foundation_module or loaded_foundation
+            appkit_module = appkit_module or loaded_appkit
         self._eventkit = eventkit_module
         self._foundation = foundation_module
+        self._appkit = appkit_module
         self._store = store or self._eventkit.EKEventStore.alloc().init()
         self._permission_timeout = permission_timeout
         self._reminder_fetch_timeout = reminder_fetch_timeout
         self._lock = RLock()
+
+    def list_calendars(self, *, source_ids: list[str]) -> list[EventKitCalendarData]:
+        if not source_ids:
+            return []
+        with self._lock:
+            self._ensure_full_access(self._eventkit.EKEntityTypeEvent)
+            try:
+                authorized = set(source_ids)
+                calendars = self._store.calendarsForEntityType_(self._eventkit.EKEntityTypeEvent)
+                return [
+                    self._calendar_data(calendar)
+                    for calendar in calendars
+                    if _source_identifier(calendar.source()) in authorized
+                ]
+            except EventKitClientError:
+                raise
+            except Exception as error:
+                raise EventKitClientError(
+                    f"EventKit Calendar container read failed: {error}",
+                    external_state_changed=False,
+                ) from error
+
+    def get_calendar(self, *, calendar_id: str) -> EventKitCalendarData:
+        with self._lock:
+            calendar = self._get_native_calendar(calendar_id)
+            return self._calendar_data(calendar)
+
+    def create_calendar(
+        self,
+        *,
+        source_id: str,
+        title: str,
+        color: str | None,
+    ) -> EventKitCalendarData:
+        with self._lock:
+            self._ensure_full_access(self._eventkit.EKEntityTypeEvent)
+            source = self._get_native_source(source_id)
+            try:
+                calendar = self._eventkit.EKCalendar.calendarForEntityType_eventStore_(
+                    self._eventkit.EKEntityTypeEvent,
+                    self._store,
+                )
+                calendar.setSource_(source)
+                calendar.setTitle_(title)
+                if color is not None:
+                    calendar.setColor_(self._to_native_color(color))
+            except EventKitClientError:
+                raise
+            except Exception as error:
+                raise EventKitClientError(
+                    f"Unable to prepare EventKit Calendar container: {error}",
+                    external_state_changed=False,
+                ) from error
+            self._save_calendar(calendar)
+            return self._calendar_data_after_write(calendar)
+
+    def update_calendar(
+        self,
+        *,
+        calendar_id: str,
+        title: str | None,
+        color: str | None,
+    ) -> EventKitCalendarData:
+        with self._lock:
+            calendar = self._get_native_calendar(calendar_id)
+            current = self._calendar_data(calendar)
+            if current.is_immutable or not current.allows_content_modifications:
+                raise EventKitClientError(
+                    f"EventKit Calendar cannot be modified: {calendar_id}",
+                    external_state_changed=False,
+                )
+            if title is None and color is None:
+                raise EventKitClientError(
+                    "Calendar update requires title or color",
+                    external_state_changed=False,
+                )
+            try:
+                changed = False
+                if title is not None and title != current.title:
+                    calendar.setTitle_(title)
+                    changed = True
+                if color is not None and color != current.color:
+                    calendar.setColor_(self._to_native_color(color))
+                    changed = True
+                if not changed:
+                    return current
+            except EventKitClientError:
+                raise
+            except Exception as error:
+                raise EventKitClientError(
+                    f"Unable to prepare EventKit Calendar update: {error}",
+                    external_state_changed=False,
+                ) from error
+            self._save_calendar(calendar)
+            return self._calendar_data_after_write(calendar)
 
     def list_events(
         self,
@@ -521,6 +634,42 @@ class EventKitClient:
             )
         return event
 
+    def _get_native_source(self, source_id: str) -> object:
+        try:
+            source = self._store.sourceWithIdentifier_(source_id)
+        except Exception as error:
+            raise EventKitClientError(
+                f"Unable to read EventKit Source: {error}",
+                external_state_changed=False,
+            ) from error
+        if source is None:
+            raise EventKitClientError(
+                f"EventKit Source not found: {source_id}",
+                external_state_changed=False,
+            )
+        return source
+
+    def _get_native_calendar(self, calendar_id: str) -> object:
+        self._ensure_full_access(self._eventkit.EKEntityTypeEvent)
+        try:
+            calendar = self._store.calendarWithIdentifier_(calendar_id)
+        except Exception as error:
+            raise EventKitClientError(
+                f"Unable to read EventKit Calendar container: {error}",
+                external_state_changed=False,
+            ) from error
+        if calendar is None:
+            raise EventKitClientError(
+                f"EventKit Calendar not found: {calendar_id}",
+                external_state_changed=False,
+            )
+        if not int(calendar.allowedEntityTypes()) & int(self._eventkit.EKEntityMaskEvent):
+            raise EventKitClientError(
+                f"EventKit object is not an Event Calendar: {calendar_id}",
+                external_state_changed=False,
+            )
+        return calendar
+
     def _get_native_reminder(self, *, reminder_id: str, list_id: str) -> object:
         self._ensure_full_access(self._eventkit.EKEntityTypeReminder)
         reminder_list = self._resolve_one_calendar(
@@ -561,6 +710,22 @@ class EventKitClient:
         if not saved:
             raise EventKitClientError(
                 f"EventKit event save failed: {_native_error_description(error)}",
+            )
+
+    def _save_calendar(self, calendar: object) -> None:
+        try:
+            saved, error = self._store.saveCalendar_commit_error_(
+                calendar,
+                True,
+                None,
+            )
+        except Exception as error:
+            raise EventKitClientError(
+                f"EventKit Calendar save failed: {error}",
+            ) from error
+        if not saved:
+            raise EventKitClientError(
+                f"EventKit Calendar save failed: {_native_error_description(error)}",
             )
 
     def _save_reminder(self, reminder: object) -> None:
@@ -631,6 +796,36 @@ class EventKitClient:
             location=_optional_native_string(event.location()) if include_location else None,
             notes=_optional_native_string(event.notes()) if include_notes else None,
         )
+
+    def _calendar_data(self, calendar: object) -> EventKitCalendarData:
+        source = calendar.source()
+        if source is None:
+            raise EventKitClientError(
+                "EventKit Calendar has no Source",
+                external_state_changed=False,
+            )
+        return EventKitCalendarData(
+            calendar_id=_calendar_identifier(calendar),
+            source_id=_source_identifier(source),
+            source_title=_required_native_string(source.title(), "source title"),
+            title=_calendar_title(calendar),
+            color=self._from_native_color(calendar.color()),
+            calendar_type=_calendar_type_name(
+                int(calendar.type()),
+                self._eventkit,
+            ),
+            allows_content_modifications=bool(calendar.allowsContentModifications()),
+            is_immutable=bool(calendar.isImmutable()),
+            is_subscribed=bool(calendar.isSubscribed()),
+        )
+
+    def _calendar_data_after_write(self, calendar: object) -> EventKitCalendarData:
+        try:
+            return self._calendar_data(calendar)
+        except Exception as error:
+            raise EventKitClientError(
+                f"EventKit Calendar write succeeded but returned invalid data: {error}",
+            ) from error
 
     def _event_data_after_write(
         self,
@@ -744,9 +939,40 @@ class EventKitClient:
         native_date = calendar.dateFromComponents_(components)
         return self._from_native_date(native_date)
 
+    def _to_native_color(self, color: str) -> object:
+        red, green, blue = _parse_hex_color(color)
+        return self._appkit.NSColor.colorWithSRGBRed_green_blue_alpha_(
+            red / 255,
+            green / 255,
+            blue / 255,
+            1.0,
+        )
 
-def _load_eventkit_modules() -> tuple[object, object]:
+    def _from_native_color(self, color: object | None) -> str | None:
+        if color is None:
+            return None
+        converted = color.colorUsingColorSpace_(self._appkit.NSColorSpace.sRGBColorSpace())
+        if converted is None:
+            raise EventKitClientError(
+                "EventKit Calendar color cannot be converted to sRGB",
+                external_state_changed=False,
+            )
+        values = (
+            round(float(converted.redComponent()) * 255),
+            round(float(converted.greenComponent()) * 255),
+            round(float(converted.blueComponent()) * 255),
+        )
+        if any(value < 0 or value > 255 for value in values):
+            raise EventKitClientError(
+                "EventKit Calendar color is outside the sRGB range",
+                external_state_changed=False,
+            )
+        return "#" + "".join(f"{value:02X}" for value in values)
+
+
+def _load_eventkit_modules() -> tuple[object, object, object]:
     try:
+        import AppKit
         import EventKit
         import Foundation
     except ImportError as error:
@@ -754,7 +980,7 @@ def _load_eventkit_modules() -> tuple[object, object]:
             "PyObjC EventKit is required on macOS",
             external_state_changed=False,
         ) from error
-    return EventKit, Foundation
+    return EventKit, Foundation, AppKit
 
 
 def _calendar_identifier(calendar: object) -> str:
@@ -763,6 +989,40 @@ def _calendar_identifier(calendar: object) -> str:
 
 def _calendar_title(calendar: object) -> str:
     return _required_native_string(calendar.title(), "calendar title")
+
+
+def _source_identifier(source: object) -> str:
+    return _required_native_string(source.sourceIdentifier(), "source identifier")
+
+
+def _calendar_type_name(value: int, eventkit: object) -> str:
+    names = {
+        int(eventkit.EKCalendarTypeLocal): "local",
+        int(eventkit.EKCalendarTypeCalDAV): "caldav",
+        int(eventkit.EKCalendarTypeExchange): "exchange",
+        int(eventkit.EKCalendarTypeSubscription): "subscription",
+        int(eventkit.EKCalendarTypeBirthday): "birthday",
+    }
+    return names.get(value, "unknown")
+
+
+def _parse_hex_color(value: str) -> tuple[int, int, int]:
+    if len(value) != 7 or not value.startswith("#"):
+        raise EventKitClientError(
+            "Calendar color must use #RRGGBB",
+            external_state_changed=False,
+        )
+    try:
+        return (
+            int(value[1:3], 16),
+            int(value[3:5], 16),
+            int(value[5:7], 16),
+        )
+    except ValueError as error:
+        raise EventKitClientError(
+            "Calendar color must use #RRGGBB",
+            external_state_changed=False,
+        ) from error
 
 
 def _item_belongs_to_calendar(item: object, calendar: object) -> bool:

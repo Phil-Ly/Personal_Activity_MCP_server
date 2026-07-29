@@ -97,12 +97,12 @@ allow_delete_operations = false
 require_confirmation_for_event_completion_updates = true
 require_confirmation_for_reminder_completion = true
 
-[[calendar_sources]]
-# 必须与 Apple 日历侧边栏中的日历名称完全一致。
-calendar_id = "Your Calendar Name"
-title = "Calendar"
-# 建议先保持只读，确认读取范围正确后再按需改为 true。
-allow_write = false
+[[eventkit_sources]]
+# 必须使用 EventKit 原生 EKSource.sourceIdentifier，不能填写账户显示名称。
+source_id = "Your EventKit Source ID"
+title = "iCloud"
+allow_calendar_write = true
+default_calendar_source = true
 
 [[reminder_sources]]
 # 必须与 Apple 提醒事项侧边栏中的列表名称完全一致。
@@ -116,23 +116,25 @@ allow_write = false
 
 - `sidecar_path`：MCP 自己维护的本地 SQLite 文件。可以省略并使用默认路径。
 - `default_timezone`：没有其他明确时区信息时使用的 IANA 时区。
-- `calendar_sources`：允许 MCP 访问的 Apple 日历白名单。
+- `eventkit_sources`：允许 PAMCP 管理 Calendar 容器的 EventKit 账户来源范围。
 - `reminder_sources`：允许 MCP 访问的 Apple 提醒事项列表白名单。
-- `calendar_id`：当前后端使用 Apple 日历中的日历名称作为标识。
+- `source_id`：EventKit 原生 `EKSource.sourceIdentifier`，显示名称不作为身份。
 - `list_id`：当前后端使用 Apple 提醒事项中的列表名称作为标识。
 - `title`：面向 Agent 和用户显示的名称，可以与对应标识相同。
-- `allow_write`：控制对应日历或列表能否被写入；`false` 表示只读。
+- `allow_calendar_write`：控制该 EventKit Source 下的 Calendar 容器及日程能否被写入。
+- `default_calendar_source`：未在创建 Calendar Tool 中指定 Source 时使用的默认可写来源。
+- `allow_write`：控制对应 Reminder List 能否被写入；`false` 表示只读。
 
-如需授权多个日历或提醒事项列表，可以重复添加对应的
-`[[calendar_sources]]` 或 `[[reminder_sources]]` 区块。未写入配置的来源不会获得隐式
-访问权限。
+如需授权多个 EventKit 账户来源或 Reminder List，可以重复添加对应的
+`[[eventkit_sources]]` 或 `[[reminder_sources]]` 区块。未写入配置的来源不会获得隐式
+访问权限。Calendar 容器由 PAMCP 创建，不再要求用户先手工创建 Calendar 并逐项写入配置。
 
 建议按照以下顺序启用：
 
-1. 在 Apple 日历和 Apple 提醒事项中确认需要访问的来源名称。
-2. 将名称逐字填写到配置文件，所有 `allow_write` 暂时保持 `false`。
-3. 让 Agent 分别测试日历和提醒事项读取能力，确认白名单范围正确。
-4. 只对确实需要写入的来源设置 `allow_write = true`。
+1. 确认允许 PAMCP 管理 Calendar 的 EventKit Source 原生标识。
+2. 将 `source_id` 写入 `eventkit_sources`，并选择一个默认 Calendar Source。
+3. 让 Agent 调用 Calendar 容器查询能力，确认 Source 授权范围正确。
+4. 只对确实需要写入 Calendar 的 Source 设置 `allow_calendar_write = true`。
 5. 首次写入前让 Agent 展示将要执行的动作，并由用户明确确认。
 
 配置加载器会拒绝远程传输、批量操作、删除操作以及关闭必要确认保护的设置。
@@ -163,6 +165,9 @@ allow_write = false
 
 Tools：
 
+- `calendar.list_calendars`
+- `calendar.create_calendar`
+- `calendar.update_calendar`
 - `calendar.list_events`
 - `calendar.create_event`
 - `calendar.update_event`
@@ -180,7 +185,7 @@ Prompt：
 ## 隐私与安全
 
 - Server 和 SQLite Sidecar 均运行在用户本机。
-- Calendar 和 Reminder 访问范围由配置白名单限定。
+- Calendar 访问范围由 EventKit Source 授权限定，Reminder 仍由 List 白名单限定。
 - 写权限按来源单独开启，不会因读取授权而自动获得。
 - 当前版本不提供远程传输、批量操作或删除能力。
 - 敏感日志默认关闭。

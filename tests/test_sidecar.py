@@ -307,6 +307,45 @@ def test_clean_schema_rejects_removed_action_record_type(tmp_path: Path) -> None
         )
 
 
+def test_clean_schema_accepts_calendar_container_without_item_status_semantics(
+    tmp_path: Path,
+) -> None:
+    repository = SidecarRepository(tmp_path / "state.sqlite3")
+    repository.initialize()
+
+    with repository.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO mcp_item (
+                id,
+                item_type,
+                external_id,
+                external_container_id,
+                status_semantics,
+                completion_status,
+                source_refs_json,
+                created_by_mcp
+            )
+            VALUES (
+                'calendar:container-1',
+                'calendar',
+                'calendar-1',
+                'source-icloud',
+                NULL,
+                NULL,
+                '[]',
+                1
+            )
+            """
+        )
+
+    item = repository.get_mcp_item("calendar:container-1")
+    assert item is not None
+    assert item["item_type"] == "calendar"
+    assert item["external_id"] == "calendar-1"
+    assert item["external_container_id"] == "source-icloud"
+
+
 def test_lists_external_item_contexts_from_compact_item_rows(tmp_path: Path) -> None:
     repository = SidecarRepository(tmp_path / "sidecar.sqlite3")
     repository.initialize()
