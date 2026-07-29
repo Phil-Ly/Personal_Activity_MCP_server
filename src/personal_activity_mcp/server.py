@@ -11,6 +11,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from personal_activity_mcp.calendar import CalendarRepository, MacOSCalendarBackend
+from personal_activity_mcp.common.eventkit import EventKitClient
 from personal_activity_mcp.config import ConfigError, load_config
 from personal_activity_mcp.prompts.activity import register_review_prompt
 from personal_activity_mcp.reminders import MacOSReminderBackend, ReminderRepository
@@ -30,14 +31,21 @@ def create_server(
     config = load_config(config_path)
     sidecar = SidecarRepository(config.sidecar_path)
     sidecar.initialize()
+    eventkit_client = (
+        EventKitClient() if calendar_backend is None or reminder_backend is None else None
+    )
     calendar_repository = CalendarRepository(
         config,
-        calendar_backend or MacOSCalendarBackend(),
+        calendar_backend
+        if calendar_backend is not None
+        else MacOSCalendarBackend(client=eventkit_client),
         sidecar,
     )
     reminder_repository = ReminderRepository(
         config,
-        reminder_backend or MacOSReminderBackend(),
+        reminder_backend
+        if reminder_backend is not None
+        else MacOSReminderBackend(client=eventkit_client),
         sidecar,
     )
     server = FastMCP(

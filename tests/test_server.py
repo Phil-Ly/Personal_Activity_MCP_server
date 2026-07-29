@@ -3,6 +3,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+from personal_activity_mcp import server as server_module
 from personal_activity_mcp.calendar import CalendarEventRecord, DescriptionUpdate
 from personal_activity_mcp.reminders import ReminderRecord
 from personal_activity_mcp.server import create_server, main
@@ -227,6 +228,37 @@ allow_write = true
 """.strip(),
         encoding="utf-8",
     )
+
+
+def test_default_backends_share_one_eventkit_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    shared_client = object()
+    backend_clients: list[object] = []
+
+    monkeypatch.setattr(
+        server_module,
+        "EventKitClient",
+        lambda: shared_client,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server_module,
+        "MacOSCalendarBackend",
+        lambda *, client: backend_clients.append(client) or FakeCalendarBackend(),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "MacOSReminderBackend",
+        lambda *, client: backend_clients.append(client) or FakeReminderBackend(),
+    )
+
+    create_server(config_path)
+
+    assert backend_clients == [shared_client, shared_client]
 
 
 def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None:

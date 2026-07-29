@@ -26,5 +26,5 @@ def require_aware_datetime(value: datetime, field_name: str) -> None:
 
 
 def normalize_external_datetime(value: datetime) -> datetime:
-    """Match AppleScript's millisecond precision before hashing or writing."""
+    """Normalize external datetimes to millisecond precision before writes."""
     return value.replace(microsecond=(value.microsecond // 1_000) * 1_000)

@@ -4,6 +4,9 @@ PAMCP（Personal Activity MCP）是一个仅在本机运行的 macOS MCP Server�
 Apple 日历、Apple 提醒事项和本地 Sidecar 数据访问能力。Server 使用 stdio 与 Agent
 通信，不提供远程传输服务。
 
+PyPI 分发名和命令行入口都是 `pamcp`；源码中的 Python 导入包名保持为
+`personal_activity_mcp`。
+
 ## 功能
 
 - 读取显式授权的 Apple 日历日程。
@@ -30,7 +33,7 @@ Apple 日历、Apple 提醒事项和本地 Sidecar 数据访问能力。Server �
 
 ## 安装
 
-发布到 PyPI 后，推荐使用 `uvx` 直接运行：
+推荐使用 `uvx` 直接运行：
 
 ```bash
 uvx pamcp --help
@@ -213,10 +216,28 @@ pamcp --config ~/.config/pamcp/config.toml
 ## 开发验证
 
 ```bash
-pytest -q
-ruff check .
-ruff format --check .
+python -m pytest -q
+python -m ruff check .
+python -m ruff format --check .
 ```
+
+如果尚未激活项目虚拟环境，把上面的 `python` 换成 `.venv/bin/python` 即可。
+
+## 维护者发布
+
+自动发布由
+[`release.yml`](https://github.com/Phil-Ly/Personal_Activity_MCP_server/blob/master/.github/workflows/release.yml)
+完成。标准流程是：
+
+1. 在 `pyproject.toml` 修改为一个尚未发布的新版本，并提交全部目标改动。
+2. 等待该提交的 CI 通过。
+3. 创建同版本 tag，例如版本 `0.12.1` 对应 `v0.12.1`，并把 tag 推送到 GitHub。
+4. 在该 tag 上创建并发布 GitHub Release；仅推送 tag 不会触发 PyPI 发布。
+5. workflow 在全新 runner 上校验 tag 与版本、构建 wheel 和 sdist，再通过 PyPI
+   Trusted Publishing 上传。
+
+本地 `dist/` 已被忽略，自动发布不会读取其中的旧包。PyPI 不允许覆盖同名版本；发布后
+发现代码或文档问题时必须提高版本号并创建新 tag，不能重新上传原版本。
 
 ## 许可证
 

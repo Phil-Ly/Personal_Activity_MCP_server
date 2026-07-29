@@ -28,6 +28,7 @@ def test_runtime_dependencies_do_not_install_the_mcp_cli_extra() -> None:
     assert pyproject["project"]["dependencies"] == [
         "mcp>=1.27,<2",
         "pydantic>=2.11,<3",
+        "pyobjc-framework-EventKit>=12.2.1,<13; sys_platform == 'darwin'",
     ]
 
 

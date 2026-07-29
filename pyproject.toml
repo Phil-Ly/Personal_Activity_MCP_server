@@ -29,6 +29,7 @@ classifiers = [
 dependencies = [
     "mcp>=1.27,<2",
     "pydantic>=2.11,<3",
+    "pyobjc-framework-EventKit>=12.2.1,<13; sys_platform == 'darwin'",
 ]
 
 [project.urls]

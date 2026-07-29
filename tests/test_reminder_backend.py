@@ -1,119 +1,173 @@
-import os
-import subprocess
-from datetime import UTC, datetime
-from pathlib import Path
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+from typing import Any
 
 import pytest
 
+from personal_activity_mcp.common.eventkit import (
+    EventKitClientError,
+    EventKitReminderData,
+)
 from personal_activity_mcp.reminders import MacOSReminderBackend, ReminderBackendError
-from personal_activity_mcp.reminders import backend as reminder_backend
-
-OSASCRIPT = Path("/usr/bin/osascript")
 
 
-class RecordingReminderBackend(MacOSReminderBackend):
-    def __init__(self, responses: list[str]) -> None:
-        super().__init__(Path("/usr/bin/false"))
+class RecordingEventKitClient:
+    def __init__(self, responses: list[object]) -> None:
         self.responses = responses
-        self.calls: list[list[str]] = []
+        self.calls: list[tuple[str, dict[str, object]]] = []
 
-    def _run_jxa(self, script: str, args: list[str]) -> str:
-        self.calls.append(args)
-        return self.responses.pop(0)
+    def _respond(self, operation: str, arguments: dict[str, object]) -> Any:
+        self.calls.append((operation, arguments))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def list_reminders(self, **arguments: object) -> list[EventKitReminderData]:
+        return self._respond("list_reminders", arguments)
+
+    def create_reminder(self, **arguments: object) -> EventKitReminderData:
+        return self._respond("create_reminder", arguments)
+
+    def complete_reminder(self, **arguments: object) -> EventKitReminderData:
+        return self._respond("complete_reminder", arguments)
+
+    def get_reminder(self, **arguments: object) -> EventKitReminderData:
+        return self._respond("get_reminder", arguments)
 
 
-def reminder_payload(*, completed: bool) -> str:
-    completion_date = '"2026-07-09T12:00:00+00:00"' if completed else "null"
-    return (
-        "{"
-        '"reminder_id":"reminder-1",'
-        '"list_id":"Personal",'
-        '"title":"Existing reminder",'
-        '"notes":null,'
-        '"due_date":"2026-07-09T00:00:00+00:00",'
-        '"priority":5,'
-        f'"is_completed":{str(completed).lower()},'
-        f'"completion_date":{completion_date}'
-        "}"
-    )
-
-
-def test_get_reminder_reads_one_exact_list_target() -> None:
-    backend = RecordingReminderBackend([reminder_payload(completed=False)])
-
-    record = backend.get_reminder(
+def reminder_data(*, completed: bool = False) -> EventKitReminderData:
+    return EventKitReminderData(
         reminder_id="reminder-1",
         list_id="Personal",
+        title="Existing reminder",
+        notes="Notes",
+        due_date=date(2026, 7, 9),
+        priority=5,
+        is_completed=completed,
+        completion_date=(datetime(2026, 7, 9, 12, tzinfo=UTC) if completed else None),
     )
 
-    assert backend.calls == [["Personal", "reminder-1"]]
+
+def test_list_reminders_preserves_backend_contract_and_record_shape() -> None:
+    client = RecordingEventKitClient([[reminder_data()]])
+    backend = MacOSReminderBackend(client=client)
+    start_due_at = datetime(2026, 7, 9, tzinfo=UTC)
+    end_due_at = datetime(2026, 7, 9, 23, 59, tzinfo=UTC)
+
+    records = backend.list_reminders(
+        list_ids=["Personal"],
+        start_due_at=start_due_at,
+        end_due_at=end_due_at,
+        start_completed_at=None,
+        end_completed_at=None,
+        include_completed=False,
+        include_notes=True,
+    )
+
+    assert client.calls == [
+        (
+            "list_reminders",
+            {
+                "list_ids": ["Personal"],
+                "start_due_at": start_due_at,
+                "end_due_at": end_due_at,
+                "start_completed_at": None,
+                "end_completed_at": None,
+                "include_completed": False,
+                "include_notes": True,
+            },
+        )
+    ]
+    assert records[0].reminder_id == "reminder-1"
+    assert records[0].list_id == "Personal"
+    assert records[0].due_date == date(2026, 7, 9)
+
+
+def test_create_reminder_passes_due_date_and_priority() -> None:
+    client = RecordingEventKitClient([reminder_data()])
+    backend = MacOSReminderBackend(client=client)
+    due_date = date(2026, 7, 9)
+
+    record = backend.create_reminder(
+        list_id="Personal",
+        title="Existing reminder",
+        notes="Notes",
+        due_date=due_date,
+        priority=5,
+    )
+
+    assert client.calls == [
+        (
+            "create_reminder",
+            {
+                "list_id": "Personal",
+                "title": "Existing reminder",
+                "notes": "Notes",
+                "due_date": due_date,
+                "priority": 5,
+            },
+        )
+    ]
     assert record.reminder_id == "reminder-1"
-    assert record.list_id == "Personal"
-    assert record.is_completed is False
 
 
 def test_complete_reminder_writes_one_exact_list_target() -> None:
-    backend = RecordingReminderBackend([reminder_payload(completed=True)])
+    client = RecordingEventKitClient([reminder_data(completed=True)])
+    backend = MacOSReminderBackend(client=client)
+    completion_date = datetime(2026, 7, 9, 12, tzinfo=UTC)
 
     record = backend.complete_reminder(
         reminder_id="reminder-1",
         list_id="Personal",
-        completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
+        completion_date=completion_date,
     )
 
-    assert backend.calls == [["Personal", "reminder-1", "2026-07-09T12:00:00+00:00"]]
+    assert client.calls == [
+        (
+            "complete_reminder",
+            {
+                "reminder_id": "reminder-1",
+                "list_id": "Personal",
+                "completion_date": completion_date,
+            },
+        )
+    ]
     assert record.is_completed is True
+    assert record.completion_date == completion_date
 
 
-@pytest.mark.skipif(not OSASCRIPT.is_file(), reason="osascript is only available on macOS")
-@pytest.mark.parametrize("timezone", ["America/Los_Angeles", "UTC", "Asia/Shanghai"])
-def test_local_date_formatter_preserves_calendar_date(timezone: str) -> None:
-    formatter = getattr(reminder_backend, "_LOCAL_DATE_FORMATTER_JXA", "")
-    assert formatter, "Reminder JXA must define a shared local date formatter"
-    script = (
-        formatter
-        + '\nfunction run(argv) { return formatLocalDate(new Date(argv[0] + "T00:00:00")); }'
+def test_get_reminder_reads_one_exact_list_target() -> None:
+    client = RecordingEventKitClient([reminder_data()])
+    backend = MacOSReminderBackend(client=client)
+
+    record = backend.get_reminder(reminder_id="reminder-1", list_id="Personal")
+
+    assert client.calls == [
+        (
+            "get_reminder",
+            {
+                "reminder_id": "reminder-1",
+                "list_id": "Personal",
+            },
+        )
+    ]
+    assert record.reminder_id == "reminder-1"
+
+
+def test_eventkit_error_becomes_reminder_backend_error_with_write_state() -> None:
+    client = RecordingEventKitClient(
+        [
+            EventKitClientError(
+                "EventKit permission denied",
+                external_state_changed=False,
+            )
+        ]
     )
+    backend = MacOSReminderBackend(client=client)
 
-    result = subprocess.run(
-        [str(OSASCRIPT), "-l", "JavaScript", "-e", script, "2026-07-09"],
-        check=True,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "TZ": timezone},
-    )
-
-    assert result.stdout.strip() == "2026-07-09"
-
-
-def test_reminder_jxa_uses_local_formatter_for_due_dates() -> None:
-    for script in (
-        reminder_backend._LIST_REMINDERS_JXA,
-        reminder_backend._CREATE_REMINDER_JXA,
-        reminder_backend._GET_REMINDER_JXA,
-        reminder_backend._COMPLETE_REMINDER_JXA,
-    ):
-        assert "formatLocalDate(" in script
-        assert "toISOString().slice(0, 10)" not in script
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        "not-json",
-        '{"reminder_id":"reminder-1"}',
-        reminder_payload(completed=False).replace(
-            '"is_completed":false',
-            '"is_completed":"false"',
-        ),
-        reminder_payload(completed=False).replace(
-            '"title":"Existing reminder"',
-            '"title":123',
-        ),
-    ],
-)
-def test_get_reminder_translates_malformed_payload_to_backend_error(payload: str) -> None:
-    backend = RecordingReminderBackend([payload])
-
-    with pytest.raises(ReminderBackendError, match="invalid payload"):
+    with pytest.raises(ReminderBackendError, match="permission denied") as captured:
         backend.get_reminder(reminder_id="reminder-1", list_id="Personal")
+
+    assert captured.value.external_state_changed is False

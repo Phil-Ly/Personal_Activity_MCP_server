@@ -927,7 +927,7 @@ def test_create_event_can_retry_when_backend_confirms_no_external_change(
             self.create_calls.append(kwargs)
             if len(self.create_calls) == 1:
                 raise CalendarBackendError(
-                    "osascript could not start",
+                    "Calendar backend could not start",
                     external_state_changed=False,
                 )
             record = CalendarEventRecord(
