@@ -16,7 +16,6 @@ def test_load_config_accepts_configuration_without_local_file_sources(tmp_path: 
     config = load_config(config_path)
 
     assert config.eventkit_sources == ()
-    assert config.reminder_sources == ()
     assert (
         config.sidecar_path
         == (
@@ -51,7 +50,7 @@ def test_load_config_accepts_explicit_sidecar_path(tmp_path: Path) -> None:
     assert config.sidecar_path == sidecar_path.resolve()
 
 
-def test_load_config_accepts_eventkit_source_calendar_policy(tmp_path: Path) -> None:
+def test_load_config_accepts_eventkit_source_container_policies(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     write_config(
         config_path,
@@ -63,11 +62,14 @@ source_id = "source-icloud"
 title = "iCloud"
 allow_calendar_write = true
 default_calendar_source = true
+allow_reminder_write = true
+default_reminder_source = true
 
 [[eventkit_sources]]
 source_id = "source-exchange"
 title = "Exchange"
 allow_calendar_write = false
+allow_reminder_write = false
 """,
     )
 
@@ -78,9 +80,13 @@ allow_calendar_write = false
     assert config.eventkit_sources[0].title == "iCloud"
     assert config.eventkit_sources[0].allow_calendar_write is True
     assert config.eventkit_sources[0].default_calendar_source is True
+    assert config.eventkit_sources[0].allow_reminder_write is True
+    assert config.eventkit_sources[0].default_reminder_source is True
     assert config.eventkit_sources[1].source_id == "source-exchange"
     assert config.eventkit_sources[1].allow_calendar_write is False
     assert config.eventkit_sources[1].default_calendar_source is False
+    assert config.eventkit_sources[1].allow_reminder_write is False
+    assert config.eventkit_sources[1].default_reminder_source is False
 
 
 def test_load_config_rejects_legacy_calendar_container_allowlist(tmp_path: Path) -> None:
@@ -149,30 +155,62 @@ def test_load_config_rejects_unknown_default_timezone(tmp_path: Path) -> None:
         load_config(config_path)
 
 
-def test_load_config_accepts_reminder_list_allowlist(tmp_path: Path) -> None:
+def test_load_config_rejects_legacy_reminder_list_allowlist(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     write_config(
         config_path,
         """
 [[reminder_sources]]
 list_id = "Personal"
-title = "Personal"
 allow_write = true
-
-[[reminder_sources]]
-list_id = "Work"
-title = "Work"
-allow_write = false
 """,
     )
 
-    config = load_config(config_path)
+    with pytest.raises(
+        ConfigError,
+        match="Unknown configuration keys: reminder_sources",
+    ):
+        load_config(config_path)
 
-    assert config.reminder_sources[0].list_id == "Personal"
-    assert config.reminder_sources[0].title == "Personal"
-    assert config.reminder_sources[0].allow_write is True
-    assert config.reminder_sources[1].list_id == "Work"
-    assert config.reminder_sources[1].allow_write is False
+
+def test_load_config_rejects_multiple_default_reminder_sources(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        """
+[[eventkit_sources]]
+source_id = "source-icloud"
+allow_reminder_write = true
+default_reminder_source = true
+
+[[eventkit_sources]]
+source_id = "source-local"
+allow_reminder_write = true
+default_reminder_source = true
+""",
+    )
+
+    with pytest.raises(ConfigError, match="Only one default Reminder EventKit Source"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_read_only_default_reminder_source(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_config(
+        config_path,
+        """
+[[eventkit_sources]]
+source_id = "source-exchange"
+allow_reminder_write = false
+default_reminder_source = true
+""",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match="Default Reminder EventKit Source must allow Reminder writes",
+    ):
+        load_config(config_path)
 
 
 def test_load_config_defaults_to_private_and_strict_local_policy(tmp_path: Path) -> None:
@@ -329,7 +367,6 @@ filesystem_path = "/tmp/calendar"
     ("section", "identifier_field"),
     [
         ("eventkit_sources", "source_id"),
-        ("reminder_sources", "list_id"),
     ],
 )
 def test_load_config_rejects_control_characters_in_source_identifiers(
@@ -361,23 +398,6 @@ def test_load_config_rejects_removed_activity_log_setting(tmp_path: Path) -> Non
         ConfigError,
         match="Unknown configuration keys: default_activity_log_calendar_id",
     ):
-        load_config(config_path)
-
-
-def test_load_config_rejects_duplicate_reminder_list_ids(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    write_config(
-        config_path,
-        """
-[[reminder_sources]]
-list_id = "Personal"
-
-[[reminder_sources]]
-list_id = "Personal"
-""",
-    )
-
-    with pytest.raises(ConfigError, match="Duplicate reminder list_id: Personal"):
         load_config(config_path)
 
 

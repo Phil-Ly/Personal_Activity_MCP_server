@@ -65,6 +65,21 @@ class EventKitCalendarData:
     is_subscribed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class EventKitReminderListData:
+    """Python representation of one EventKit Reminder List container."""
+
+    list_id: str
+    source_id: str
+    source_title: str
+    title: str
+    color: str | None
+    calendar_type: str
+    allows_content_modifications: bool
+    is_immutable: bool
+    is_subscribed: bool
+
+
 class EventKitClient:
     """Use one native Event Store for Calendar and Reminders operations."""
 
@@ -185,6 +200,107 @@ class EventKitClient:
                 ) from error
             self._save_calendar(calendar)
             return self._calendar_data_after_write(calendar)
+
+    def list_reminder_lists(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[EventKitReminderListData]:
+        if not source_ids:
+            return []
+        with self._lock:
+            self._ensure_full_access(self._eventkit.EKEntityTypeReminder)
+            try:
+                authorized = set(source_ids)
+                reminder_lists = self._store.calendarsForEntityType_(
+                    self._eventkit.EKEntityTypeReminder
+                )
+                return [
+                    self._reminder_list_data(reminder_list)
+                    for reminder_list in reminder_lists
+                    if _source_identifier(reminder_list.source()) in authorized
+                ]
+            except EventKitClientError:
+                raise
+            except Exception as error:
+                raise EventKitClientError(
+                    f"EventKit Reminder List read failed: {error}",
+                    external_state_changed=False,
+                ) from error
+
+    def get_reminder_list(self, *, list_id: str) -> EventKitReminderListData:
+        with self._lock:
+            reminder_list = self._get_native_reminder_list(list_id)
+            return self._reminder_list_data(reminder_list)
+
+    def create_reminder_list(
+        self,
+        *,
+        source_id: str,
+        title: str,
+        color: str | None,
+    ) -> EventKitReminderListData:
+        with self._lock:
+            self._ensure_full_access(self._eventkit.EKEntityTypeReminder)
+            source = self._get_native_source(source_id)
+            try:
+                reminder_list = self._eventkit.EKCalendar.calendarForEntityType_eventStore_(
+                    self._eventkit.EKEntityTypeReminder,
+                    self._store,
+                )
+                reminder_list.setSource_(source)
+                reminder_list.setTitle_(title)
+                if color is not None:
+                    reminder_list.setColor_(self._to_native_color(color))
+            except EventKitClientError:
+                raise
+            except Exception as error:
+                raise EventKitClientError(
+                    f"Unable to prepare EventKit Reminder List: {error}",
+                    external_state_changed=False,
+                ) from error
+            self._save_calendar(reminder_list)
+            return self._reminder_list_data_after_write(reminder_list)
+
+    def update_reminder_list(
+        self,
+        *,
+        list_id: str,
+        title: str | None,
+        color: str | None,
+    ) -> EventKitReminderListData:
+        with self._lock:
+            reminder_list = self._get_native_reminder_list(list_id)
+            current = self._reminder_list_data(reminder_list)
+            if current.is_immutable or not current.allows_content_modifications:
+                raise EventKitClientError(
+                    f"EventKit Reminder List cannot be modified: {list_id}",
+                    external_state_changed=False,
+                )
+            if title is None and color is None:
+                raise EventKitClientError(
+                    "Reminder List update requires title or color",
+                    external_state_changed=False,
+                )
+            try:
+                changed = False
+                if title is not None and title != current.title:
+                    reminder_list.setTitle_(title)
+                    changed = True
+                if color is not None and color != current.color:
+                    reminder_list.setColor_(self._to_native_color(color))
+                    changed = True
+                if not changed:
+                    return current
+            except EventKitClientError:
+                raise
+            except Exception as error:
+                raise EventKitClientError(
+                    f"Unable to prepare EventKit Reminder List update: {error}",
+                    external_state_changed=False,
+                ) from error
+            self._save_calendar(reminder_list)
+            return self._reminder_list_data_after_write(reminder_list)
 
     def list_events(
         self,
@@ -670,6 +786,27 @@ class EventKitClient:
             )
         return calendar
 
+    def _get_native_reminder_list(self, list_id: str) -> object:
+        self._ensure_full_access(self._eventkit.EKEntityTypeReminder)
+        try:
+            reminder_list = self._store.calendarWithIdentifier_(list_id)
+        except Exception as error:
+            raise EventKitClientError(
+                f"Unable to read EventKit Reminder List: {error}",
+                external_state_changed=False,
+            ) from error
+        if reminder_list is None:
+            raise EventKitClientError(
+                f"EventKit Reminder List not found: {list_id}",
+                external_state_changed=False,
+            )
+        if not int(reminder_list.allowedEntityTypes()) & int(self._eventkit.EKEntityMaskReminder):
+            raise EventKitClientError(
+                f"EventKit object is not a Reminder List: {list_id}",
+                external_state_changed=False,
+            )
+        return reminder_list
+
     def _get_native_reminder(self, *, reminder_id: str, list_id: str) -> object:
         self._ensure_full_access(self._eventkit.EKEntityTypeReminder)
         reminder_list = self._resolve_one_calendar(
@@ -825,6 +962,39 @@ class EventKitClient:
         except Exception as error:
             raise EventKitClientError(
                 f"EventKit Calendar write succeeded but returned invalid data: {error}",
+            ) from error
+
+    def _reminder_list_data(self, reminder_list: object) -> EventKitReminderListData:
+        source = reminder_list.source()
+        if source is None:
+            raise EventKitClientError(
+                "EventKit Reminder List has no Source",
+                external_state_changed=False,
+            )
+        return EventKitReminderListData(
+            list_id=_calendar_identifier(reminder_list),
+            source_id=_source_identifier(source),
+            source_title=_required_native_string(source.title(), "source title"),
+            title=_calendar_title(reminder_list),
+            color=self._from_native_color(reminder_list.color()),
+            calendar_type=_calendar_type_name(
+                int(reminder_list.type()),
+                self._eventkit,
+            ),
+            allows_content_modifications=bool(reminder_list.allowsContentModifications()),
+            is_immutable=bool(reminder_list.isImmutable()),
+            is_subscribed=bool(reminder_list.isSubscribed()),
+        )
+
+    def _reminder_list_data_after_write(
+        self,
+        reminder_list: object,
+    ) -> EventKitReminderListData:
+        try:
+            return self._reminder_list_data(reminder_list)
+        except Exception as error:
+            raise EventKitClientError(
+                f"EventKit Reminder List write succeeded but returned invalid data: {error}",
             ) from error
 
     def _event_data_after_write(

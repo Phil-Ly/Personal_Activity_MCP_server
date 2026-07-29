@@ -37,6 +37,7 @@ def test_readme_documents_safe_manual_configuration() -> None:
 
     assert "~/.config/pamcp/config.toml" in readme
     assert 'source_id = "Your EventKit Source ID"' in readme
-    assert 'list_id = "Your Reminder List Name"' in readme
-    assert "allow_write = false" in readme
+    assert "allow_calendar_write = true" in readme
+    assert "allow_reminder_write = true" in readme
+    assert "reminder_sources" not in readme
     assert "/Users/" not in readme

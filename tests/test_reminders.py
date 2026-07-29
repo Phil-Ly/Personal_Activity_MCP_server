@@ -6,9 +6,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from personal_activity_mcp.common import TargetRef, ToolContractError
-from personal_activity_mcp.config import AppConfig, ReminderSource
+from personal_activity_mcp.config import AppConfig, EventKitSource
 from personal_activity_mcp.reminders import (
     ReminderBackendError,
+    ReminderListContainerRecord,
     ReminderRecord,
     ReminderRepository,
 )
@@ -19,11 +20,25 @@ from personal_activity_mcp.sidecar import SidecarRepository
 class FakeReminderBackend:
     def __init__(self, reminders: list[ReminderRecord] | None = None) -> None:
         self.reminders = reminders or []
+        self.lists = {
+            "Personal": _reminder_list("Personal", "source-personal"),
+            "Work": _reminder_list("Work", "source-work"),
+        }
         self.list_calls: list[dict[str, object]] = []
         self.create_calls: list[dict[str, object]] = []
         self.get_calls: list[dict[str, str]] = []
         self.complete_calls: list[dict[str, object]] = []
         self.next_created_reminder_id = "created-reminder-1"
+
+    def list_reminder_lists(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[ReminderListContainerRecord]:
+        return [item for item in self.lists.values() if item.source_id in source_ids]
+
+    def get_reminder_list(self, *, list_id: str) -> ReminderListContainerRecord:
+        return self.lists[list_id]
 
     def list_reminders(
         self,
@@ -165,11 +180,39 @@ class FakeReminderBackend:
 def make_config(tmp_path: Path) -> AppConfig:
     return AppConfig(
         sidecar_path=tmp_path / "sidecar.sqlite3",
-        reminder_sources=(
-            ReminderSource("Personal", "Personal", True),
-            ReminderSource("Work", "Work", False),
+        eventkit_sources=(
+            EventKitSource(
+                "source-personal",
+                "Personal",
+                False,
+                False,
+                True,
+                True,
+            ),
+            EventKitSource(
+                "source-work",
+                "Work",
+                False,
+                False,
+                False,
+                False,
+            ),
         ),
         default_timezone="Asia/Shanghai",
+    )
+
+
+def _reminder_list(list_id: str, source_id: str) -> ReminderListContainerRecord:
+    return ReminderListContainerRecord(
+        list_id=list_id,
+        source_id=source_id,
+        source_title=source_id,
+        title=list_id,
+        color="#3366CC",
+        calendar_type="caldav",
+        allows_content_modifications=True,
+        is_immutable=False,
+        is_subscribed=False,
     )
 
 

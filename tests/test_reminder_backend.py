@@ -8,6 +8,7 @@ import pytest
 from personal_activity_mcp.common.eventkit import (
     EventKitClientError,
     EventKitReminderData,
+    EventKitReminderListData,
 )
 from personal_activity_mcp.reminders import MacOSReminderBackend, ReminderBackendError
 
@@ -36,6 +37,18 @@ class RecordingEventKitClient:
     def get_reminder(self, **arguments: object) -> EventKitReminderData:
         return self._respond("get_reminder", arguments)
 
+    def list_reminder_lists(self, **arguments: object) -> list[EventKitReminderListData]:
+        return self._respond("list_reminder_lists", arguments)
+
+    def get_reminder_list(self, **arguments: object) -> EventKitReminderListData:
+        return self._respond("get_reminder_list", arguments)
+
+    def create_reminder_list(self, **arguments: object) -> EventKitReminderListData:
+        return self._respond("create_reminder_list", arguments)
+
+    def update_reminder_list(self, **arguments: object) -> EventKitReminderListData:
+        return self._respond("update_reminder_list", arguments)
+
 
 def reminder_data(*, completed: bool = False) -> EventKitReminderData:
     return EventKitReminderData(
@@ -48,6 +61,72 @@ def reminder_data(*, completed: bool = False) -> EventKitReminderData:
         is_completed=completed,
         completion_date=(datetime(2026, 7, 9, 12, tzinfo=UTC) if completed else None),
     )
+
+
+def reminder_list_data() -> EventKitReminderListData:
+    return EventKitReminderListData(
+        list_id="list-1",
+        source_id="source-icloud",
+        source_title="iCloud",
+        title="Plan steps",
+        color="#3366CC",
+        calendar_type="caldav",
+        allows_content_modifications=True,
+        is_immutable=False,
+        is_subscribed=False,
+    )
+
+
+def test_reminder_list_cru_delegates_to_eventkit_and_converts_record() -> None:
+    client = RecordingEventKitClient(
+        [
+            [reminder_list_data()],
+            reminder_list_data(),
+            reminder_list_data(),
+            reminder_list_data(),
+        ]
+    )
+    backend = MacOSReminderBackend(client=client)
+
+    listed = backend.list_reminder_lists(source_ids=["source-icloud"])
+    fetched = backend.get_reminder_list(list_id="list-1")
+    created = backend.create_reminder_list(
+        source_id="source-icloud",
+        title="Plan steps",
+        color="#3366CC",
+    )
+    updated = backend.update_reminder_list(
+        list_id="list-1",
+        title="New title",
+        color=None,
+    )
+
+    assert client.calls == [
+        ("list_reminder_lists", {"source_ids": ["source-icloud"]}),
+        ("get_reminder_list", {"list_id": "list-1"}),
+        (
+            "create_reminder_list",
+            {
+                "source_id": "source-icloud",
+                "title": "Plan steps",
+                "color": "#3366CC",
+            },
+        ),
+        (
+            "update_reminder_list",
+            {
+                "list_id": "list-1",
+                "title": "New title",
+                "color": None,
+            },
+        ),
+    ]
+    assert listed[0].list_id == "list-1"
+    assert listed[0].source_id == "source-icloud"
+    assert listed[0].color == "#3366CC"
+    assert fetched == listed[0]
+    assert created == listed[0]
+    assert updated == listed[0]
 
 
 def test_list_reminders_preserves_backend_contract_and_record_shape() -> None:

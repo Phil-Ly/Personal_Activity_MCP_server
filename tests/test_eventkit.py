@@ -473,8 +473,12 @@ class FakeStore:
             and self.assign_calendar_identifier_on_save
             and calendar.calendarIdentifier() is None
         ):
-            calendar.identifier = "calendar-created"
-            self.event_calendars.append(calendar)
+            if calendar.allowedEntityTypes() == 1:
+                calendar.identifier = "calendar-created"
+                self.event_calendars.append(calendar)
+            else:
+                calendar.identifier = "list-created"
+                self.reminder_calendars.append(calendar)
         return self.save_calendar_result
 
     def predicateForEventsWithStartDate_endDate_calendars_(
@@ -600,6 +604,7 @@ def _client(
         EKEntityTypeEvent=0,
         EKEntityTypeReminder=1,
         EKEntityMaskEvent=1,
+        EKEntityMaskReminder=2,
         EKSpanThisEvent=0,
         EKCalendarTypeLocal=0,
         EKCalendarTypeCalDAV=1,
@@ -724,6 +729,139 @@ def test_update_calendar_rejects_immutable_target_before_save() -> None:
 
     assert captured.value.external_state_changed is False
     assert store.saved_calendars == []
+
+
+def test_list_reminder_lists_returns_only_requested_native_sources() -> None:
+    icloud = FakeSource("source-icloud", "iCloud")
+    exchange = FakeSource("source-exchange", "Exchange")
+    selected = FakeCalendar(
+        "list-1",
+        "Plan steps",
+        source=icloud,
+        color=FakeNSColor(0.2, 0.4, 0.8, 1.0),
+        allowed_entity_types=2,
+    )
+    other = FakeCalendar(
+        "list-2",
+        "Work",
+        source=exchange,
+        allowed_entity_types=2,
+    )
+    store = FakeStore(
+        reminder_calendars=[selected, other],
+        sources=[icloud, exchange],
+    )
+    client = _client(store)
+
+    records = client.list_reminder_lists(source_ids=["source-icloud"])
+
+    assert len(records) == 1
+    assert records[0].list_id == "list-1"
+    assert records[0].source_id == "source-icloud"
+    assert records[0].source_title == "iCloud"
+    assert records[0].title == "Plan steps"
+    assert records[0].color == "#3366CC"
+    assert records[0].calendar_type == "caldav"
+    assert records[0].allows_content_modifications is True
+    assert records[0].is_immutable is False
+    assert records[0].is_subscribed is False
+
+
+def test_get_reminder_list_rejects_an_event_calendar_entity() -> None:
+    source = FakeSource("source-icloud", "iCloud")
+    event_calendar = FakeCalendar(
+        "calendar-1",
+        "Calendar",
+        source=source,
+        allowed_entity_types=1,
+    )
+    store = FakeStore(event_calendars=[event_calendar], sources=[source])
+    client = _client(store)
+
+    with pytest.raises(EventKitClientError, match="not a Reminder List"):
+        client.get_reminder_list(list_id="calendar-1")
+
+
+def test_create_reminder_list_sets_source_title_and_color_before_saving() -> None:
+    icloud = FakeSource("source-icloud", "iCloud")
+    store = FakeStore(sources=[icloud])
+    client = _client(store)
+
+    record = client.create_reminder_list(
+        source_id="source-icloud",
+        title="Japanese plan",
+        color="#3366CC",
+    )
+
+    assert record.list_id == "list-created"
+    assert record.source_id == "source-icloud"
+    assert record.title == "Japanese plan"
+    assert record.color == "#3366CC"
+    assert store.created_calendar is not None
+    assert store.created_calendar.allowedEntityTypes() == 2
+    assert store.created_calendar.source() is icloud
+    assert store.saved_calendars == [(store.created_calendar, True)]
+
+
+def test_update_reminder_list_changes_only_requested_properties_and_keeps_source() -> None:
+    icloud = FakeSource("source-icloud", "iCloud")
+    reminder_list = FakeCalendar(
+        "list-1",
+        "Old",
+        source=icloud,
+        allowed_entity_types=2,
+    )
+    store = FakeStore(reminder_calendars=[reminder_list], sources=[icloud])
+    client = _client(store)
+
+    record = client.update_reminder_list(
+        list_id="list-1",
+        title="New",
+        color="#112233",
+    )
+
+    assert record.title == "New"
+    assert record.color == "#112233"
+    assert reminder_list.source() is icloud
+    assert store.saved_calendars == [(reminder_list, True)]
+
+
+def test_update_reminder_list_rejects_immutable_target_before_save() -> None:
+    reminder_list = FakeCalendar(
+        "list-1",
+        "Read only",
+        immutable=True,
+        allowed_entity_types=2,
+    )
+    store = FakeStore(reminder_calendars=[reminder_list])
+    client = _client(store)
+
+    with pytest.raises(EventKitClientError, match="cannot be modified") as captured:
+        client.update_reminder_list(
+            list_id="list-1",
+            title="New",
+            color=None,
+        )
+
+    assert captured.value.external_state_changed is False
+    assert store.saved_calendars == []
+
+
+def test_successful_reminder_list_create_without_identifier_is_unknown() -> None:
+    icloud = FakeSource("source-icloud", "iCloud")
+    store = FakeStore(sources=[icloud])
+    store.assign_calendar_identifier_on_save = False
+    client = _client(store)
+
+    with pytest.raises(EventKitClientError, match="write succeeded") as captured:
+        client.create_reminder_list(
+            source_id="source-icloud",
+            title="Japanese plan",
+            color=None,
+        )
+
+    assert store.saved_calendars
+    assert captured.value.external_state_changed is None
 
 
 def test_failed_calendar_save_preserves_unknown_external_write_outcome() -> None:

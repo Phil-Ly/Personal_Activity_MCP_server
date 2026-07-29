@@ -9,7 +9,7 @@ from personal_activity_mcp.calendar import (
     CalendarEventRecord,
     DescriptionUpdate,
 )
-from personal_activity_mcp.reminders import ReminderRecord
+from personal_activity_mcp.reminders import ReminderListContainerRecord, ReminderRecord
 from personal_activity_mcp.server import create_server, main
 
 
@@ -188,9 +188,86 @@ class FakeCalendarBackend:
 
 class FakeReminderBackend:
     def __init__(self) -> None:
+        self.lists: dict[str, ReminderListContainerRecord] = {
+            "Personal": ReminderListContainerRecord(
+                list_id="Personal",
+                source_id="source-icloud",
+                source_title="iCloud",
+                title="Personal",
+                color="#3366CC",
+                calendar_type="caldav",
+                allows_content_modifications=True,
+                is_immutable=False,
+                is_subscribed=False,
+            )
+        }
+        self.created_lists: list[dict[str, object]] = []
+        self.updated_lists: list[dict[str, object]] = []
         self.created_reminders: list[dict[str, object]] = []
         self.completed_reminders: list[dict[str, object]] = []
         self.reminders: dict[tuple[str, str], ReminderRecord] = {}
+
+    def list_reminder_lists(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[ReminderListContainerRecord]:
+        return [item for item in self.lists.values() if item.source_id in source_ids]
+
+    def get_reminder_list(self, *, list_id: str) -> ReminderListContainerRecord:
+        return self.lists[list_id]
+
+    def create_reminder_list(
+        self,
+        *,
+        source_id: str,
+        title: str,
+        color: str | None,
+    ) -> ReminderListContainerRecord:
+        self.created_lists.append(
+            {
+                "source_id": source_id,
+                "title": title,
+                "color": color,
+            }
+        )
+        record = ReminderListContainerRecord(
+            list_id=f"created-list-{len(self.created_lists)}",
+            source_id=source_id,
+            source_title="iCloud",
+            title=title,
+            color=color or "#3366CC",
+            calendar_type="caldav",
+            allows_content_modifications=True,
+            is_immutable=False,
+            is_subscribed=False,
+        )
+        self.lists[record.list_id] = record
+        return record
+
+    def update_reminder_list(
+        self,
+        *,
+        list_id: str,
+        title: str | None,
+        color: str | None,
+    ) -> ReminderListContainerRecord:
+        self.updated_lists.append(
+            {
+                "list_id": list_id,
+                "title": title,
+                "color": color,
+            }
+        )
+        current = self.lists[list_id]
+        record = current.model_copy(
+            update={
+                "title": title if title is not None else current.title,
+                "color": color if color is not None else current.color,
+            }
+        )
+        self.lists[list_id] = record
+        return record
 
     def list_reminders(
         self,
@@ -305,10 +382,11 @@ def write_config_with_reminders(config_path: Path, sidecar_path: Path) -> None:
         f"""
 sidecar_path = "{sidecar_path}"
 
-[[reminder_sources]]
-list_id = "Personal"
-title = "Personal"
-allow_write = true
+[[eventkit_sources]]
+source_id = "source-icloud"
+title = "iCloud"
+allow_reminder_write = true
+default_reminder_source = true
 """.strip(),
         encoding="utf-8",
     )
@@ -361,6 +439,9 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
         "calendar.list_events",
         "calendar.create_event",
         "calendar.update_event",
+        "reminders.list_lists",
+        "reminders.create_list",
+        "reminders.update_list",
         "reminders.list_reminders",
         "reminders.create_reminder",
         "reminders.complete_reminder",
@@ -395,6 +476,16 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
     )
     assert set(calendar_update_container.inputSchema["required"]) == {
         "calendar_id",
+        "idempotency_key",
+    }
+    reminder_list_create = next(tool for tool in tools if tool.name == "reminders.create_list")
+    assert set(reminder_list_create.inputSchema["required"]) == {
+        "title",
+        "idempotency_key",
+    }
+    reminder_list_update = next(tool for tool in tools if tool.name == "reminders.update_list")
+    assert set(reminder_list_update.inputSchema["required"]) == {
+        "list_id",
         "idempotency_key",
     }
 
@@ -498,6 +589,29 @@ def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path
     backend = FakeReminderBackend()
     server = create_server(config_path, reminder_backend=backend)
 
+    _, container_list_result = anyio.run(
+        server.call_tool,
+        "reminders.list_lists",
+        {},
+    )
+    _, container_create_result = anyio.run(
+        server.call_tool,
+        "reminders.create_list",
+        {
+            "title": "Japanese Plan",
+            "color": "#3366CC",
+            "idempotency_key": "reminder:create-list:demo",
+        },
+    )
+    _, container_update_result = anyio.run(
+        server.call_tool,
+        "reminders.update_list",
+        {
+            "list_id": "created-list-1",
+            "title": "Japanese Plan 2026",
+            "idempotency_key": "reminder:update-list:demo",
+        },
+    )
     _, list_result = anyio.run(
         server.call_tool,
         "reminders.list_reminders",
@@ -536,6 +650,11 @@ def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path
         },
     )
 
+    assert container_list_result["lists"][0]["list_id"] == "Personal"
+    assert container_create_result["list"]["list_id"] == "created-list-1"
+    assert container_create_result["created"] is True
+    assert container_update_result["list"]["title"] == "Japanese Plan 2026"
+    assert container_update_result["updated"] is True
     assert list_result["reminders"][0]["reminder_id"] == "reminder-1"
     assert list_result["reminders"][0]["notes"] is None
     assert create_result["reminder_id"] == "created-reminder-1"
@@ -545,6 +664,8 @@ def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path
     assert complete_result["stable_id"] == create_result["stable_id"]
     assert len(backend.created_reminders) == 1
     assert len(backend.completed_reminders) == 1
+    assert len(backend.created_lists) == 1
+    assert len(backend.updated_lists) == 1
 
 
 def test_main_reports_missing_configuration_without_traceback(

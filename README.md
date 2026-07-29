@@ -72,8 +72,8 @@ touch ~/.config/pamcp/config.toml
 chmod 600 ~/.config/pamcp/config.toml
 ```
 
-然后将下面的模板复制到 `config.toml`。模板中的日历和提醒事项名称都是虚构占位符，
-必须替换成当前 Mac 上实际存在的名称。
+然后将下面的模板复制到 `config.toml`。模板中的 EventKit Source 标识是虚构占位符，
+必须替换成当前 Mac 上实际存在的原生 Source 标识。
 
 ```toml
 # 可省略。省略后使用相同的默认本地路径。
@@ -103,38 +103,36 @@ source_id = "Your EventKit Source ID"
 title = "iCloud"
 allow_calendar_write = true
 default_calendar_source = true
-
-[[reminder_sources]]
-# 必须与 Apple 提醒事项侧边栏中的列表名称完全一致。
-list_id = "Your Reminder List Name"
-title = "Reminder List"
-# 建议先保持只读，确认读取范围正确后再按需改为 true。
-allow_write = false
+allow_reminder_write = true
+default_reminder_source = true
 ```
 
 ### 配置字段说明
 
 - `sidecar_path`：MCP 自己维护的本地 SQLite 文件。可以省略并使用默认路径。
 - `default_timezone`：没有其他明确时区信息时使用的 IANA 时区。
-- `eventkit_sources`：允许 PAMCP 管理 Calendar 容器的 EventKit 账户来源范围。
-- `reminder_sources`：允许 MCP 访问的 Apple 提醒事项列表白名单。
+- `eventkit_sources`：允许 PAMCP 管理 Calendar 和 Reminder List 容器的 EventKit
+  账户来源范围。
 - `source_id`：EventKit 原生 `EKSource.sourceIdentifier`，显示名称不作为身份。
-- `list_id`：当前后端使用 Apple 提醒事项中的列表名称作为标识。
 - `title`：面向 Agent 和用户显示的名称，可以与对应标识相同。
 - `allow_calendar_write`：控制该 EventKit Source 下的 Calendar 容器及日程能否被写入。
 - `default_calendar_source`：未在创建 Calendar Tool 中指定 Source 时使用的默认可写来源。
-- `allow_write`：控制对应 Reminder List 能否被写入；`false` 表示只读。
+- `allow_reminder_write`：控制该 EventKit Source 下的 Reminder List 及 Reminder
+  能否被写入。
+- `default_reminder_source`：未在创建 Reminder List Tool 中指定 Source 时使用的默认
+  可写来源。
 
-如需授权多个 EventKit 账户来源或 Reminder List，可以重复添加对应的
-`[[eventkit_sources]]` 或 `[[reminder_sources]]` 区块。未写入配置的来源不会获得隐式
-访问权限。Calendar 容器由 PAMCP 创建，不再要求用户先手工创建 Calendar 并逐项写入配置。
+如需授权多个 EventKit 账户来源，可以重复添加 `[[eventkit_sources]]` 区块。未写入配置的
+来源不会获得隐式访问权限。Calendar 和 Reminder List 容器均由 PAMCP 创建，不再要求用户
+先手工创建容器并逐项写入配置。
 
 建议按照以下顺序启用：
 
-1. 确认允许 PAMCP 管理 Calendar 的 EventKit Source 原生标识。
-2. 将 `source_id` 写入 `eventkit_sources`，并选择一个默认 Calendar Source。
-3. 让 Agent 调用 Calendar 容器查询能力，确认 Source 授权范围正确。
-4. 只对确实需要写入 Calendar 的 Source 设置 `allow_calendar_write = true`。
+1. 确认允许 PAMCP 管理 Calendar 和 Reminder List 的 EventKit Source 原生标识。
+2. 将 `source_id` 写入 `eventkit_sources`，并按需选择默认 Calendar Source 和
+   Reminder Source。
+3. 让 Agent 分别调用 Calendar 与 Reminder List 容器查询能力，确认 Source 授权范围。
+4. 只对确实需要写入的 Source 开启对应的 Calendar 或 Reminder 写权限。
 5. 首次写入前让 Agent 展示将要执行的动作，并由用户明确确认。
 
 配置加载器会拒绝远程传输、批量操作、删除操作以及关闭必要确认保护的设置。
@@ -171,6 +169,9 @@ Tools：
 - `calendar.list_events`
 - `calendar.create_event`
 - `calendar.update_event`
+- `reminders.list_lists`
+- `reminders.create_list`
+- `reminders.update_list`
 - `reminders.list_reminders`
 - `reminders.create_reminder`
 - `reminders.complete_reminder`
@@ -185,7 +186,7 @@ Prompt：
 ## 隐私与安全
 
 - Server 和 SQLite Sidecar 均运行在用户本机。
-- Calendar 访问范围由 EventKit Source 授权限定，Reminder 仍由 List 白名单限定。
+- Calendar 和 Reminders 访问范围均由 EventKit Source 授权限定。
 - 写权限按来源单独开启，不会因读取授权而自动获得。
 - 当前版本不提供远程传输、批量操作或删除能力。
 - 敏感日志默认关闭。
@@ -205,8 +206,8 @@ pamcp --config ~/.config/pamcp/config.toml
 
 ### 读取结果为空
 
-先确认 `calendar_id` 或 `list_id` 与应用侧边栏中的名称完全一致，并确认请求的时间范围
-确实包含数据。
+先通过容器查询 Tool 确认原生 `calendar_id` 或 `list_id`，再确认请求的时间范围确实包含
+数据；显示名称不作为对象身份。
 
 ### macOS 拒绝访问日历或提醒事项
 

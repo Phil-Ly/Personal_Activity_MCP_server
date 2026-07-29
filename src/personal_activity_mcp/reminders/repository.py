@@ -20,6 +20,7 @@ from personal_activity_mcp.reminders.models import (
     ReminderCompleteResult,
     ReminderCreateResult,
     ReminderEvidence,
+    ReminderListContainerRecord,
     ReminderListResult,
     ReminderRecord,
     ReminderTimeRange,
@@ -79,9 +80,21 @@ class ReminderBackend(Protocol):
         list_id: str,
     ) -> ReminderRecord: ...
 
+    def list_reminder_lists(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[ReminderListContainerRecord]: ...
+
+    def get_reminder_list(
+        self,
+        *,
+        list_id: str,
+    ) -> ReminderListContainerRecord: ...
+
 
 class ReminderRepository:
-    """Read and write configured Apple Reminders lists."""
+    """Read and write reminders in authorized EventKit Sources."""
 
     def __init__(
         self,
@@ -89,7 +102,7 @@ class ReminderRepository:
         backend: ReminderBackend,
         sidecar: SidecarRepository | None = None,
     ) -> None:
-        self._reminder_sources = {source.list_id: source for source in config.reminder_sources}
+        self._eventkit_sources = {source.source_id: source for source in config.eventkit_sources}
         self._default_timezone = ZoneInfo(config.default_timezone)
         self._backend = backend
         self._sidecar = sidecar
@@ -108,7 +121,7 @@ class ReminderRepository:
         limit: int = 100,
         cursor: str | None = None,
     ) -> ReminderListResult:
-        """List reminder evidence from explicitly configured lists."""
+        """List reminder evidence from lists in authorized EventKit Sources."""
         _validate_optional_range(start_due_at, end_due_at, "due")
         _validate_optional_range(start_completed_at, end_completed_at, "completion")
         validate_limit(limit)
@@ -173,10 +186,8 @@ class ReminderRepository:
         idempotency_key: str,
     ) -> ReminderCreateResult:
         """Create a Reminder with allowlist, idempotency, and audit controls."""
-        source = self._reminder_sources.get(list_id)
-        if source is None:
-            raise ValueError(f"Unknown reminder list_ids: {list_id}")
-        if not source.allow_write:
+        source = self._reminder_source(list_id)
+        if not source.allow_reminder_write:
             raise ValueError(f"Reminder list is not allowed for writes: {list_id}")
         if self._sidecar is None:
             raise ValueError("sidecar is required for reminders.create_reminder")
@@ -306,10 +317,8 @@ class ReminderRepository:
             raise ValueError("target_ref must identify one reminder and Reminder List")
         reminder_id = target_ref.item_id
         list_id = target_ref.container_id
-        source = self._reminder_sources.get(list_id)
-        if source is None:
-            raise ValueError(f"Unknown reminder list_ids: {list_id}")
-        if not source.allow_write:
+        source = self._reminder_source(list_id)
+        if not source.allow_reminder_write:
             raise ValueError(f"Reminder list is not allowed for writes: {list_id}")
         require_aware_datetime(completion_date, "completion_date")
         completion_date = normalize_external_datetime(completion_date)
@@ -454,11 +463,39 @@ class ReminderRepository:
 
     def _select_list_ids(self, list_ids: list[str] | None) -> list[str]:
         if list_ids is None:
-            return list(self._reminder_sources)
-        unknown = sorted(set(list_ids) - self._reminder_sources.keys())
+            records = self._backend.list_reminder_lists(source_ids=list(self._eventkit_sources))
+            return list(
+                dict.fromkeys(
+                    record.list_id
+                    for record in records
+                    if record.source_id in self._eventkit_sources
+                )
+            )
+        selected: list[str] = []
+        unknown: list[str] = []
+        for list_id in dict.fromkeys(list_ids):
+            try:
+                record = self._backend.get_reminder_list(list_id=list_id)
+            except Exception:
+                unknown.append(list_id)
+                continue
+            if record.source_id not in self._eventkit_sources:
+                unknown.append(list_id)
+                continue
+            selected.append(list_id)
         if unknown:
-            raise ValueError(f"Unknown reminder list_ids: {', '.join(unknown)}")
-        return list_ids
+            raise ValueError(f"Unknown reminder list_ids: {', '.join(sorted(unknown))}")
+        return selected
+
+    def _reminder_source(self, list_id: str):
+        try:
+            record = self._backend.get_reminder_list(list_id=list_id)
+        except Exception as error:
+            raise ValueError(f"Unknown reminder list_ids: {list_id}") from error
+        source = self._eventkit_sources.get(record.source_id)
+        if source is None:
+            raise ValueError(f"Unknown reminder list_ids: {list_id}")
+        return source
 
     def _to_evidence(
         self,

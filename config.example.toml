@@ -1,5 +1,5 @@
 # Copy this file outside the repository or to a local ignored path.
-# EventKit account Sources and Reminder lists grant access only to configured scopes.
+# EventKit account Sources grant access only to configured container scopes.
 # Local activity files are read by the Agent and are not configured in this server.
 
 # Optional. The loader uses this same repository-external path when omitted.
@@ -31,14 +31,5 @@ source_id = "Your EventKit Source ID"
 title = "iCloud"
 allow_calendar_write = true
 default_calendar_source = true
-
-[[reminder_sources]]
-# In the current macOS backend, list_id is the Reminders.app list name.
-list_id = "Personal"
-title = "Personal"
-allow_write = true
-
-[[reminder_sources]]
-list_id = "Work"
-title = "Work"
-allow_write = false
+allow_reminder_write = true
+default_reminder_source = true

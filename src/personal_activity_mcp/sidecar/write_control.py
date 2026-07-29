@@ -26,7 +26,7 @@ class ReservationDecision(BaseModel):
 
 class McpItemWrite(BaseModel):
     item_id: str
-    item_type: Literal["calendar_event", "reminder", "calendar"]
+    item_type: Literal["calendar_event", "reminder", "calendar", "reminder_list"]
     external_id: str
     external_container_id: str
     status_semantics: Literal["planned", "probable", "confirmed"] | None
@@ -36,13 +36,13 @@ class McpItemWrite(BaseModel):
 
     @model_validator(mode="after")
     def validate_completion_status(self) -> McpItemWrite:
-        if self.item_type in {"reminder", "calendar"} and (
+        if self.item_type in {"reminder", "calendar", "reminder_list"} and (
             self.completion_status is not None or self.expected_completion_status is not None
         ):
             raise ValueError("completion status fields are only valid for calendar_event")
-        if self.item_type == "calendar" and self.status_semantics is not None:
-            raise ValueError("status_semantics is not valid for calendar")
-        if self.item_type != "calendar" and self.status_semantics is None:
+        if self.item_type in {"calendar", "reminder_list"} and self.status_semantics is not None:
+            raise ValueError(f"status_semantics is not valid for {self.item_type}")
+        if self.item_type not in {"calendar", "reminder_list"} and self.status_semantics is None:
             raise ValueError("status_semantics is required for Calendar Events and Reminders")
         return self
 

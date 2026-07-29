@@ -18,7 +18,11 @@ from personal_activity_mcp.calendar import (
 from personal_activity_mcp.common.eventkit import EventKitClient
 from personal_activity_mcp.config import ConfigError, load_config
 from personal_activity_mcp.prompts.activity import register_review_prompt
-from personal_activity_mcp.reminders import MacOSReminderBackend, ReminderRepository
+from personal_activity_mcp.reminders import (
+    MacOSReminderBackend,
+    ReminderListRepository,
+    ReminderRepository,
+)
 from personal_activity_mcp.sidecar import SidecarRepository
 from personal_activity_mcp.tools.calendar import register_calendar_tools
 from personal_activity_mcp.tools.reminders import register_reminder_tools
@@ -53,11 +57,19 @@ def create_server(
         resolved_calendar_backend,
         sidecar,
     )
-    reminder_repository = ReminderRepository(
-        config,
+    resolved_reminder_backend = (
         reminder_backend
         if reminder_backend is not None
-        else MacOSReminderBackend(client=eventkit_client),
+        else MacOSReminderBackend(client=eventkit_client)
+    )
+    reminder_repository = ReminderRepository(
+        config,
+        resolved_reminder_backend,
+        sidecar,
+    )
+    reminder_list_repository = ReminderListRepository(
+        config,
+        resolved_reminder_backend,
         sidecar,
     )
     server = FastMCP(
@@ -71,7 +83,11 @@ def create_server(
         calendar_repository,
         calendar_container_repository,
     )
-    register_reminder_tools(server, reminder_repository)
+    register_reminder_tools(
+        server,
+        reminder_repository,
+        reminder_list_repository,
+    )
     register_review_prompt(server)
 
     return server

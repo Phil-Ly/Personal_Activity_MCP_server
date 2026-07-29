@@ -9,8 +9,12 @@ from personal_activity_mcp.common.eventkit import (
     EventKitClient,
     EventKitClientError,
     EventKitReminderData,
+    EventKitReminderListData,
 )
-from personal_activity_mcp.reminders.models import ReminderRecord
+from personal_activity_mcp.reminders.models import (
+    ReminderListContainerRecord,
+    ReminderRecord,
+)
 
 
 class ReminderBackendError(RuntimeError):
@@ -65,6 +69,34 @@ class ReminderEventKitClient(Protocol):
         reminder_id: str,
         list_id: str,
     ) -> EventKitReminderData: ...
+
+    def list_reminder_lists(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[EventKitReminderListData]: ...
+
+    def get_reminder_list(
+        self,
+        *,
+        list_id: str,
+    ) -> EventKitReminderListData: ...
+
+    def create_reminder_list(
+        self,
+        *,
+        source_id: str,
+        title: str,
+        color: str | None,
+    ) -> EventKitReminderListData: ...
+
+    def update_reminder_list(
+        self,
+        *,
+        list_id: str,
+        title: str | None,
+        color: str | None,
+    ) -> EventKitReminderListData: ...
 
 
 class MacOSReminderBackend:
@@ -151,6 +183,62 @@ class MacOSReminderBackend:
             raise _backend_error(error) from error
         return _to_reminder_record(record)
 
+    def list_reminder_lists(
+        self,
+        *,
+        source_ids: list[str],
+    ) -> list[ReminderListContainerRecord]:
+        try:
+            records = self._client.list_reminder_lists(source_ids=source_ids)
+        except EventKitClientError as error:
+            raise _backend_error(error) from error
+        return [_to_reminder_list_record(record) for record in records]
+
+    def get_reminder_list(
+        self,
+        *,
+        list_id: str,
+    ) -> ReminderListContainerRecord:
+        try:
+            record = self._client.get_reminder_list(list_id=list_id)
+        except EventKitClientError as error:
+            raise _backend_error(error) from error
+        return _to_reminder_list_record(record)
+
+    def create_reminder_list(
+        self,
+        *,
+        source_id: str,
+        title: str,
+        color: str | None,
+    ) -> ReminderListContainerRecord:
+        try:
+            record = self._client.create_reminder_list(
+                source_id=source_id,
+                title=title,
+                color=color,
+            )
+        except EventKitClientError as error:
+            raise _backend_error(error) from error
+        return _to_reminder_list_record(record)
+
+    def update_reminder_list(
+        self,
+        *,
+        list_id: str,
+        title: str | None,
+        color: str | None,
+    ) -> ReminderListContainerRecord:
+        try:
+            record = self._client.update_reminder_list(
+                list_id=list_id,
+                title=title,
+                color=color,
+            )
+        except EventKitClientError as error:
+            raise _backend_error(error) from error
+        return _to_reminder_list_record(record)
+
 
 def _to_reminder_record(record: EventKitReminderData) -> ReminderRecord:
     return ReminderRecord(
@@ -162,6 +250,22 @@ def _to_reminder_record(record: EventKitReminderData) -> ReminderRecord:
         priority=record.priority,
         is_completed=record.is_completed,
         completion_date=record.completion_date,
+    )
+
+
+def _to_reminder_list_record(
+    record: EventKitReminderListData,
+) -> ReminderListContainerRecord:
+    return ReminderListContainerRecord(
+        list_id=record.list_id,
+        source_id=record.source_id,
+        source_title=record.source_title,
+        title=record.title,
+        color=record.color,
+        calendar_type=record.calendar_type,
+        allows_content_modifications=record.allows_content_modifications,
+        is_immutable=record.is_immutable,
+        is_subscribed=record.is_subscribed,
     )
 
 

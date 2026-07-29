@@ -30,6 +30,60 @@ class ReminderRecord(BaseModel):
     completion_date: AwareDatetime | None
 
 
+class ReminderListContainerRecord(BaseModel):
+    """Raw Reminder List container returned by a backend."""
+
+    list_id: str
+    source_id: str
+    source_title: str
+    title: str
+    color: str | None
+    calendar_type: Literal[
+        "local",
+        "caldav",
+        "exchange",
+        "subscription",
+        "birthday",
+        "unknown",
+    ]
+    allows_content_modifications: bool
+    is_immutable: bool
+    is_subscribed: bool
+
+
+class ReminderListContainer(ReminderListContainerRecord):
+    """Reminder List container returned through an MCP Tool."""
+
+    state_token: str
+    created_by_mcp: bool
+
+
+class ReminderListContainerListResult(BaseModel):
+    """Paginated Reminder List container query result."""
+
+    lists: list[ReminderListContainer]
+    next_cursor: str | None = None
+
+
+class ReminderListContainerCreateResult(BaseModel):
+    """Reminder List container create result."""
+
+    list: ReminderListContainer
+    created: bool
+    deduplicated: bool
+    audit_id: str
+
+
+class ReminderListContainerUpdateResult(BaseModel):
+    """Reminder List container update result."""
+
+    list: ReminderListContainer
+    updated: bool
+    deduplicated: bool
+    updated_fields: list[Literal["title", "color"]]
+    audit_id: str
+
+
 class ReminderEvidence(BaseModel):
     """Reminder evidence returned through an MCP Tool."""
 

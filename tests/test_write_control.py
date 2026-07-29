@@ -44,6 +44,18 @@ def calendar_container_write() -> McpItemWrite:
     )
 
 
+def reminder_list_container_write() -> McpItemWrite:
+    return McpItemWrite(
+        item_id="reminder-list:container-1",
+        item_type="reminder_list",
+        external_id="list-1",
+        external_container_id="source-icloud",
+        status_semantics=None,
+        created_by_mcp=True,
+        completion_status=None,
+    )
+
+
 def test_calendar_container_rejects_event_status_semantics() -> None:
     with pytest.raises(ValueError, match="status_semantics is not valid for calendar"):
         calendar_container_write().model_copy(
@@ -53,6 +65,15 @@ def test_calendar_container_rejects_event_status_semantics() -> None:
                 **calendar_container_write().model_dump(),
                 "status_semantics": "planned",
             }
+        )
+
+
+def test_reminder_list_container_rejects_reminder_status_semantics() -> None:
+    with pytest.raises(ValueError, match="status_semantics is not valid for reminder_list"):
+        reminder_list_container_write().model_copy(
+            update={"status_semantics": "planned"}
+        ).model_validate(
+            reminder_list_container_write().model_copy(update={"status_semantics": "planned"})
         )
 
 
@@ -249,6 +270,40 @@ def test_finalize_success_commits_calendar_container_idempotency_and_audit(
     assert result is not None
     assert result.status == "succeeded"
     assert result.result_item_id == "calendar:container-1"
+    assert result.audit_id == audit.audit_id
+
+
+def test_finalize_success_commits_reminder_list_container_idempotency_and_audit(
+    tmp_path: Path,
+) -> None:
+    repository, control = make_control(tmp_path)
+    control.reserve_operation(
+        idempotency_key="reminders:create-list:1",
+        operation="reminders.create_list",
+        request_hash="request-hash",
+    )
+    audit = audit_write()
+
+    control.finalize_success(
+        idempotency_key="reminders:create-list:1",
+        operation="reminders.create_list",
+        item=reminder_list_container_write(),
+        source_refs=[],
+        audit=audit,
+    )
+
+    item = repository.get_mcp_item("reminder-list:container-1")
+    result = control.get_operation_result(
+        idempotency_key="reminders:create-list:1",
+        operation="reminders.create_list",
+    )
+    assert item is not None
+    assert item["item_type"] == "reminder_list"
+    assert item["status_semantics"] is None
+    assert item["completion_status"] is None
+    assert result is not None
+    assert result.status == "succeeded"
+    assert result.result_item_id == "reminder-list:container-1"
     assert result.audit_id == audit.audit_id
 
 

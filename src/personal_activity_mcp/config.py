@@ -24,15 +24,8 @@ class EventKitSource:
     title: str
     allow_calendar_write: bool
     default_calendar_source: bool
-
-
-@dataclass(frozen=True)
-class ReminderSource:
-    """A single explicitly authorized Apple Reminders list."""
-
-    list_id: str
-    title: str
-    allow_write: bool
+    allow_reminder_write: bool = False
+    default_reminder_source: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,7 +55,6 @@ class AppConfig:
 
     sidecar_path: Path = DEFAULT_SIDECAR_PATH
     eventkit_sources: tuple[EventKitSource, ...] = ()
-    reminder_sources: tuple[ReminderSource, ...] = ()
     default_timezone: str = "UTC"
     privacy: PrivacyConfig = PrivacyConfig()
     security: SecurityPolicy = SecurityPolicy()
@@ -84,7 +76,6 @@ def load_config(config_path: Path) -> AppConfig:
         {
             "sidecar_path",
             "eventkit_sources",
-            "reminder_sources",
             "default_timezone",
             "privacy",
             "security",
@@ -95,7 +86,6 @@ def load_config(config_path: Path) -> AppConfig:
     return AppConfig(
         sidecar_path=_parse_sidecar_path(raw.get("sidecar_path")),
         eventkit_sources=_parse_eventkit_sources(raw.get("eventkit_sources")),
-        reminder_sources=_parse_reminder_sources(raw.get("reminder_sources")),
         default_timezone=_parse_default_timezone(raw.get("default_timezone")),
         privacy=_parse_privacy_config(raw.get("privacy")),
         security=_parse_security_policy(raw.get("security")),
@@ -248,6 +238,8 @@ def _parse_eventkit_sources(raw_sources: object) -> tuple[EventKitSource, ...]:
         sources.append(source)
     if sum(source.default_calendar_source for source in sources) > 1:
         raise ConfigError("Only one default Calendar EventKit Source may be configured")
+    if sum(source.default_reminder_source for source in sources) > 1:
+        raise ConfigError("Only one default Reminder EventKit Source may be configured")
     return tuple(sources)
 
 
@@ -261,6 +253,8 @@ def _parse_eventkit_source(raw_source: object) -> EventKitSource:
             "title",
             "allow_calendar_write",
             "default_calendar_source",
+            "allow_reminder_write",
+            "default_reminder_source",
         },
         "EventKit source",
     )
@@ -282,58 +276,22 @@ def _parse_eventkit_source(raw_source: object) -> EventKitSource:
         raise ConfigError(f"EventKit Source default_calendar_source must be a boolean: {source_id}")
     if default_calendar_source and not allow_calendar_write:
         raise ConfigError("Default Calendar EventKit Source must allow Calendar writes")
+    allow_reminder_write = raw_source.get("allow_reminder_write", False)
+    if not isinstance(allow_reminder_write, bool):
+        raise ConfigError(f"EventKit Source allow_reminder_write must be a boolean: {source_id}")
+    default_reminder_source = raw_source.get("default_reminder_source", False)
+    if not isinstance(default_reminder_source, bool):
+        raise ConfigError(f"EventKit Source default_reminder_source must be a boolean: {source_id}")
+    if default_reminder_source and not allow_reminder_write:
+        raise ConfigError("Default Reminder EventKit Source must allow Reminder writes")
 
     return EventKitSource(
         source_id=source_id.strip(),
         title=title.strip(),
         allow_calendar_write=allow_calendar_write,
         default_calendar_source=default_calendar_source,
-    )
-
-
-def _parse_reminder_sources(raw_sources: object) -> tuple[ReminderSource, ...]:
-    if raw_sources is None:
-        return ()
-    if not isinstance(raw_sources, list):
-        raise ConfigError("reminder_sources must be a list")
-
-    sources: list[ReminderSource] = []
-    seen_ids: set[str] = set()
-    for raw_source in raw_sources:
-        source = _parse_reminder_source(raw_source)
-        if source.list_id in seen_ids:
-            raise ConfigError(f"Duplicate reminder list_id: {source.list_id}")
-        seen_ids.add(source.list_id)
-        sources.append(source)
-    return tuple(sources)
-
-
-def _parse_reminder_source(raw_source: object) -> ReminderSource:
-    if not isinstance(raw_source, dict):
-        raise ConfigError("Each reminder_sources entry must be a TOML table")
-    _reject_unknown_keys(
-        raw_source,
-        {"list_id", "title", "allow_write"},
-        "reminder source",
-    )
-
-    list_id = raw_source.get("list_id")
-    if not isinstance(list_id, str) or not list_id.strip():
-        raise ConfigError("Reminder list_id must be a non-empty string")
-    _reject_control_characters(list_id, "Reminder list_id")
-
-    title = raw_source.get("title", list_id)
-    if not isinstance(title, str) or not title.strip():
-        raise ConfigError(f"Reminder title must be a non-empty string: {list_id}")
-
-    allow_write = raw_source.get("allow_write", False)
-    if not isinstance(allow_write, bool):
-        raise ConfigError(f"Reminder allow_write must be a boolean: {list_id}")
-
-    return ReminderSource(
-        list_id=list_id.strip(),
-        title=title.strip(),
-        allow_write=allow_write,
+        allow_reminder_write=allow_reminder_write,
+        default_reminder_source=default_reminder_source,
     )
 
 
