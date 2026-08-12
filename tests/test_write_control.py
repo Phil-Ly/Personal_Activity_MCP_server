@@ -95,7 +95,6 @@ def audit_write(result_status: str = "succeeded") -> AuditWrite:
         request_hash="request-hash",
         result_status=result_status,
         error_code=None,
-        confirmed_by_user=True,
     )
 
 
@@ -457,7 +456,6 @@ def test_operation_result_uses_direct_audit_id_when_request_hashes_repeat(
         request_hash="shared-request-hash",
         result_status="succeeded",
         error_code=None,
-        confirmed_by_user=True,
     )
     control.finalize_success(
         idempotency_key="calendar:create:success",
@@ -475,7 +473,6 @@ def test_operation_result_uses_direct_audit_id_when_request_hashes_repeat(
         request_hash="shared-request-hash",
         result_status="failed",
         error_code="BACKEND_FAILURE",
-        confirmed_by_user=True,
     )
     control.finalize_failure(
         idempotency_key="calendar:create:failure",
@@ -522,7 +519,6 @@ def test_finalize_success_merges_source_refs_and_preserves_calendar_completion(
             request_hash="create-hash",
             result_status="succeeded",
             error_code=None,
-            confirmed_by_user=True,
         ),
     )
     control.reserve_operation(
@@ -539,7 +535,6 @@ def test_finalize_success_merges_source_refs_and_preserves_calendar_completion(
             request_hash="update-hash",
             result_status="succeeded",
             error_code=None,
-            confirmed_by_user=True,
         ),
     )
 
@@ -589,7 +584,6 @@ def test_finalize_success_never_reassigns_an_item_id_to_another_external_item(
                 request_hash="other-hash",
                 result_status="succeeded",
                 error_code=None,
-                confirmed_by_user=True,
             ),
         )
 
@@ -616,7 +610,6 @@ def test_finalize_success_allows_cumulative_source_refs_beyond_request_limit(
             request_hash="create-hash",
             result_status="succeeded",
             error_code=None,
-            confirmed_by_user=True,
         ),
     )
     control.reserve_operation(
@@ -634,7 +627,6 @@ def test_finalize_success_allows_cumulative_source_refs_beyond_request_limit(
             request_hash="update-hash",
             result_status="succeeded",
             error_code=None,
-            confirmed_by_user=True,
         ),
     )
 
@@ -671,7 +663,6 @@ def test_finalize_success_compare_and_sets_calendar_completion_status(
             request_hash="first-hash",
             result_status="succeeded",
             error_code=None,
-            confirmed_by_user=True,
         ),
         external_write_attempted=False,
     )
@@ -691,7 +682,6 @@ def test_finalize_success_compare_and_sets_calendar_completion_status(
                 request_hash="second-hash",
                 result_status="succeeded",
                 error_code=None,
-                confirmed_by_user=True,
             ),
             external_write_attempted=False,
         )

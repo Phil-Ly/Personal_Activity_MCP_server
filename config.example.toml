@@ -8,27 +8,9 @@
 sidecar_path = "~/Library/Application Support/pamcp/personal_activity.sqlite3"
 default_timezone = "Asia/Shanghai"
 
-[privacy]
-# Sensitive logging is disabled by default. Keep all detail flags false unless
-# you deliberately want logs to include private source content.
-sensitive_logging_enabled = false
-log_calendar_notes = false
-log_reminder_notes = false
-log_source_refs = false
-
-[security]
-# v1.0 is local-stdio only. These options document the active safety policy;
-# enabling remote, bulk, or delete operations is rejected by the config loader.
-allow_remote_transport = false
-allow_bulk_operations = false
-allow_delete_operations = false
-require_confirmation_for_event_completion_updates = true
-require_confirmation_for_reminder_completion = true
-
 [[eventkit_sources]]
 # Use the native EKSource.sourceIdentifier, never an account display name.
 source_id = "Your EventKit Source ID"
-title = "iCloud"
 allow_calendar_write = true
 default_calendar_source = true
 allow_reminder_write = true

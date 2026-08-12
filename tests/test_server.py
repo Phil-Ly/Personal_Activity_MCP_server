@@ -369,7 +369,6 @@ default_timezone = "Asia/Shanghai"
 
 [[eventkit_sources]]
 source_id = "source-icloud"
-title = "iCloud"
 allow_calendar_write = true
 default_calendar_source = true
 """.strip(),
@@ -384,7 +383,6 @@ sidecar_path = "{sidecar_path}"
 
 [[eventkit_sources]]
 source_id = "source-icloud"
-title = "iCloud"
 allow_reminder_write = true
 default_reminder_source = true
 """.strip(),
@@ -455,7 +453,6 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
         "completion_status",
         "expected_state_token",
         "source_refs",
-        "confirmed_by_user",
         "idempotency_key",
     }
     reminder_complete = next(tool for tool in tools if tool.name == "reminders.complete_reminder")
@@ -463,7 +460,6 @@ def test_server_exposes_no_local_file_tools_or_resources(tmp_path: Path) -> None
         "target_ref",
         "completion_date",
         "expected_state_token",
-        "confirmed_by_user",
         "idempotency_key",
     }
     calendar_create = next(tool for tool in tools if tool.name == "calendar.create_calendar")
@@ -561,7 +557,6 @@ def test_server_calendar_tools_use_configured_backend_and_sidecar(tmp_path: Path
             "completion_status": None,
             "expected_state_token": None,
             "source_refs": [],
-            "confirmed_by_user": False,
             "idempotency_key": "calendar:update:demo",
         },
     )
@@ -645,7 +640,6 @@ def test_server_reminder_tools_use_configured_backend_and_sidecar(tmp_path: Path
             },
             "completion_date": "2026-07-09T12:00:00+00:00",
             "expected_state_token": None,
-            "confirmed_by_user": True,
             "idempotency_key": "reminder:complete:demo",
         },
     )

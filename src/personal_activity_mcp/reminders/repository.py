@@ -39,6 +39,8 @@ from personal_activity_mcp.time_policy import (
     require_aware_datetime,
 )
 
+_MAX_LISTS_PER_QUERY = 100
+
 
 class ReminderBackend(Protocol):
     """Backend capable of reading Apple Reminders."""
@@ -128,6 +130,8 @@ class ReminderRepository:
         if cursor is not None:
             decode_cursor(cursor)
         selected_list_ids = self._select_list_ids(list_ids)
+        if len(selected_list_ids) > _MAX_LISTS_PER_QUERY:
+            raise ValueError("list_ids cannot include more than 100 Reminder Lists")
         records = self._backend.list_reminders(
             list_ids=selected_list_ids,
             start_due_at=start_due_at,
@@ -217,7 +221,6 @@ class ReminderRepository:
             idempotency_key=idempotency_key,
             operation="reminders.create_reminder",
             request_hash=request_digest,
-            confirmed_by_user=False,
             resource_name="Reminder",
         )
         decision = flow.reserve()
@@ -282,7 +285,6 @@ class ReminderRepository:
                     request_hash=request_digest,
                     result_status="succeeded",
                     error_code=None,
-                    confirmed_by_user=False,
                 ),
                 external_write_attempted=True,
             )
@@ -309,7 +311,6 @@ class ReminderRepository:
         target_ref: TargetRef,
         completion_date: datetime,
         expected_state_token: str | None,
-        confirmed_by_user: bool,
         idempotency_key: str,
     ) -> ReminderCompleteResult:
         """Mark an allowed Reminder as completed."""
@@ -331,7 +332,6 @@ class ReminderRepository:
             "target_ref": target_ref.model_dump(mode="json"),
             "completion_date": completion_date.isoformat(),
             "expected_state_token": expected_state_token,
-            "confirmed_by_user": confirmed_by_user,
         }
         request_digest = request_hash(request_payload)
         sidecar_item = self._sidecar.find_mcp_item_by_external(
@@ -345,15 +345,8 @@ class ReminderRepository:
             idempotency_key=idempotency_key,
             operation="reminders.complete_reminder",
             request_hash=request_digest,
-            confirmed_by_user=confirmed_by_user,
             resource_name="Reminder",
         )
-        if not confirmed_by_user:
-            flow.record_blocked(
-                target_item_id=str(sidecar_item["id"]) if sidecar_item is not None else None,
-                error_code="USER_CONFIRMATION_REQUIRED",
-            )
-            raise ValueError("confirmed_by_user is required")
 
         decision = flow.reserve()
         if decision.status == "deduplicated":
@@ -427,7 +420,6 @@ class ReminderRepository:
             request_hash=request_digest,
             result_status="succeeded",
             error_code=None,
-            confirmed_by_user=True,
         )
         try:
             write_control.finalize_success(
@@ -462,37 +454,24 @@ class ReminderRepository:
         )
 
     def _select_list_ids(self, list_ids: list[str] | None) -> list[str]:
+        records = self._backend.list_reminder_lists(source_ids=list(self._eventkit_sources))
+        available = {
+            record.list_id: record
+            for record in records
+            if record.source_id in self._eventkit_sources
+        }
         if list_ids is None:
-            records = self._backend.list_reminder_lists(source_ids=list(self._eventkit_sources))
-            return list(
-                dict.fromkeys(
-                    record.list_id
-                    for record in records
-                    if record.source_id in self._eventkit_sources
-                )
-            )
-        selected: list[str] = []
-        unknown: list[str] = []
-        for list_id in dict.fromkeys(list_ids):
-            try:
-                record = self._backend.get_reminder_list(list_id=list_id)
-            except Exception:
-                unknown.append(list_id)
-                continue
-            if record.source_id not in self._eventkit_sources:
-                unknown.append(list_id)
-                continue
-            selected.append(list_id)
+            return list(available)
+        selected = list(dict.fromkeys(list_ids))
+        unknown = [list_id for list_id in selected if list_id not in available]
         if unknown:
             raise ValueError(f"Unknown reminder list_ids: {', '.join(sorted(unknown))}")
         return selected
 
     def _reminder_source(self, list_id: str):
-        try:
-            record = self._backend.get_reminder_list(list_id=list_id)
-        except Exception as error:
-            raise ValueError(f"Unknown reminder list_ids: {list_id}") from error
-        source = self._eventkit_sources.get(record.source_id)
+        records = self._backend.list_reminder_lists(source_ids=list(self._eventkit_sources))
+        record = next((item for item in records if item.list_id == list_id), None)
+        source = self._eventkit_sources.get(record.source_id) if record is not None else None
         if source is None:
             raise ValueError(f"Unknown reminder list_ids: {list_id}")
         return source

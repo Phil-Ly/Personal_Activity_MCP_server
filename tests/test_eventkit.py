@@ -889,7 +889,7 @@ def test_denied_access_fails_before_calendar_data_is_read() -> None:
 
     with pytest.raises(EventKitClientError, match="access is denied") as captured:
         client.list_events(
-            calendar_ids=["Personal"],
+            calendar_ids=["calendar-1"],
             start=datetime(2026, 7, 8, tzinfo=UTC),
             end=datetime(2026, 7, 9, tzinfo=UTC),
             include_notes=False,
@@ -905,7 +905,7 @@ def test_not_determined_access_requests_full_event_access_once() -> None:
     client = _client(store, authorization_status=0)
 
     result = client.list_events(
-        calendar_ids=["Personal"],
+        calendar_ids=["calendar-1"],
         start=datetime(2026, 7, 8, tzinfo=UTC),
         end=datetime(2026, 7, 9, tzinfo=UTC),
         include_notes=False,
@@ -944,7 +944,7 @@ def test_not_determined_access_uses_legacy_eventkit_selector_when_needed() -> No
     client = _client(store, authorization_status=0)
 
     records = client.list_events(
-        calendar_ids=["Personal"],
+        calendar_ids=["calendar-1"],
         start=datetime(2026, 7, 8, tzinfo=UTC),
         end=datetime(2026, 7, 9, tzinfo=UTC),
         include_notes=False,
@@ -978,22 +978,41 @@ def test_empty_calendar_allowlist_returns_without_native_query(
     assert store.requested_access == []
 
 
-def test_ambiguous_calendar_title_is_rejected_instead_of_guessed() -> None:
+def test_calendar_title_is_not_accepted_as_an_identifier() -> None:
     store = FakeStore(
         event_calendars=[
             FakeCalendar("calendar-1", "Personal"),
-            FakeCalendar("calendar-2", "Personal"),
         ]
     )
     client = _client(store)
 
-    with pytest.raises(EventKitClientError, match="ambiguous"):
+    with pytest.raises(EventKitClientError, match="not found"):
         client.list_events(
             calendar_ids=["Personal"],
             start=datetime(2026, 7, 8, tzinfo=UTC),
             end=datetime(2026, 7, 9, tzinfo=UTC),
             include_notes=False,
             include_location=False,
+        )
+
+
+def test_reminder_list_title_is_not_accepted_as_an_identifier() -> None:
+    store = FakeStore(
+        reminder_calendars=[
+            FakeCalendar("list-1", "Personal", allowed_entity_types=2),
+        ]
+    )
+    client = _client(store)
+
+    with pytest.raises(EventKitClientError, match="not found"):
+        client.list_reminders(
+            list_ids=["Personal"],
+            start_due_at=None,
+            end_due_at=None,
+            start_completed_at=None,
+            end_completed_at=None,
+            include_completed=False,
+            include_notes=False,
         )
 
 
@@ -1038,7 +1057,7 @@ def test_create_event_sets_native_fields_and_returns_persisted_identifier() -> N
     end = datetime(2026, 7, 8, 11, 45, tzinfo=UTC)
 
     record = client.create_event(
-        calendar_id="Personal",
+        calendar_id="calendar-1",
         title="Language lesson",
         start=start,
         end=end,
@@ -1049,7 +1068,7 @@ def test_create_event_sets_native_fields_and_returns_persisted_identifier() -> N
     )
 
     assert record.event_id == "event-created"
-    assert record.calendar_id == "Personal"
+    assert record.calendar_id == "calendar-1"
     assert record.start == start
     assert record.end == end
     assert store.created_event is not None
@@ -1075,7 +1094,7 @@ def test_update_event_clear_notes_saves_only_the_selected_event() -> None:
 
     record = client.update_event_notes(
         event_id="event-1",
-        calendar_id="Personal",
+        calendar_id="calendar-1",
         notes=None,
     )
 
@@ -1097,7 +1116,7 @@ def test_update_event_with_matching_notes_is_a_successful_no_op() -> None:
 
     record = client.update_event_notes(
         event_id="event-1",
-        calendar_id="Personal",
+        calendar_id="calendar-1",
         notes="Already correct",
     )
 
@@ -1115,7 +1134,7 @@ def test_event_in_a_different_calendar_is_rejected() -> None:
     client = _client(store)
 
     with pytest.raises(EventKitClientError, match="not found in Calendar"):
-        client.get_event(event_id="event-1", calendar_id="Personal")
+        client.get_event(event_id="event-1", calendar_id="calendar-1")
 
 
 def test_failed_event_save_preserves_unknown_external_write_outcome() -> None:
@@ -1126,7 +1145,7 @@ def test_failed_event_save_preserves_unknown_external_write_outcome() -> None:
 
     with pytest.raises(EventKitClientError, match="save failed") as captured:
         client.create_event(
-            calendar_id="Personal",
+            calendar_id="calendar-1",
             title="Language lesson",
             start=datetime(2026, 7, 8, 10, tzinfo=UTC),
             end=datetime(2026, 7, 8, 11, tzinfo=UTC),
@@ -1147,7 +1166,7 @@ def test_successful_event_create_with_missing_identifier_is_unknown_write_outcom
 
     with pytest.raises(EventKitClientError, match="write succeeded") as captured:
         client.create_event(
-            calendar_id="Personal",
+            calendar_id="calendar-1",
             title="Language lesson",
             start=datetime(2026, 7, 8, 10, tzinfo=UTC),
             end=datetime(2026, 7, 8, 11, tzinfo=UTC),
@@ -1175,7 +1194,7 @@ def test_successful_event_update_with_malformed_result_is_unknown_write_outcome(
     with pytest.raises(EventKitClientError, match="write succeeded") as captured:
         client.update_event_notes(
             event_id="event-1",
-            calendar_id="Personal",
+            calendar_id="calendar-1",
             notes="New",
         )
 
@@ -1206,7 +1225,7 @@ def test_list_reminders_converts_due_components_and_applies_filters() -> None:
     client = _client(store, authorization_status=0)
 
     records = client.list_reminders(
-        list_ids=["Personal"],
+        list_ids=["list-1"],
         start_due_at=datetime(2026, 7, 9, tzinfo=UTC),
         end_due_at=datetime(2026, 7, 9, 23, 59, tzinfo=UTC),
         start_completed_at=None,
@@ -1217,7 +1236,7 @@ def test_list_reminders_converts_due_components_and_applies_filters() -> None:
 
     assert len(records) == 1
     assert records[0].reminder_id == "reminder-1"
-    assert records[0].list_id == "Personal"
+    assert records[0].list_id == "list-1"
     assert records[0].due_date == date(2026, 7, 9)
     assert records[0].notes is None
 
@@ -1253,7 +1272,7 @@ def test_create_reminder_uses_gregorian_date_components_without_time() -> None:
     client = _client(store)
 
     record = client.create_reminder(
-        list_id="Personal",
+        list_id="list-1",
         title="Book hotel",
         notes=None,
         due_date=date(2026, 8, 2),
@@ -1291,7 +1310,7 @@ def test_complete_reminder_sets_completion_instant_and_saves() -> None:
 
     record = client.complete_reminder(
         reminder_id="reminder-1",
-        list_id="Personal",
+        list_id="list-1",
         completion_date=completed_at,
     )
 
@@ -1311,7 +1330,7 @@ def test_failed_reminder_save_preserves_unknown_external_write_outcome() -> None
 
     with pytest.raises(EventKitClientError, match="reminder save failed") as captured:
         client.create_reminder(
-            list_id="Personal",
+            list_id="list-1",
             title="Study",
             notes=None,
             due_date=None,
@@ -1329,7 +1348,7 @@ def test_successful_reminder_create_with_missing_identifier_is_unknown_write_out
 
     with pytest.raises(EventKitClientError, match="write succeeded") as captured:
         client.create_reminder(
-            list_id="Personal",
+            list_id="list-1",
             title="Study",
             notes=None,
             due_date=None,
@@ -1353,7 +1372,7 @@ def test_successful_reminder_update_with_malformed_result_is_unknown_write_outco
     with pytest.raises(EventKitClientError, match="write succeeded") as captured:
         client.complete_reminder(
             reminder_id="reminder-1",
-            list_id="Personal",
+            list_id="list-1",
             completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
         )
 

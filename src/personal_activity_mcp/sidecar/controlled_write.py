@@ -22,7 +22,6 @@ class ControlledWrite:
     idempotency_key: str
     operation: str
     request_hash: str
-    confirmed_by_user: bool
     resource_name: str
 
     def reserve(self) -> ReservationDecision:
@@ -30,13 +29,11 @@ class ControlledWrite:
             idempotency_key=self.idempotency_key,
             operation=self.operation,
             request_hash=self.request_hash,
-            confirmed_by_user=self.confirmed_by_user,
         )
         self.control.audit_non_executable_reservation(
             decision,
             operation=self.operation,
             request_hash=self.request_hash,
-            confirmed_by_user=self.confirmed_by_user,
         )
         if decision.status == "conflict":
             raise ValueError("idempotency_key conflicts with different request")
@@ -57,7 +54,6 @@ class ControlledWrite:
             target_item_id=target_item_id,
             request_hash=self.request_hash,
             error_code=error_code,
-            confirmed_by_user=self.confirmed_by_user,
         )
 
     def backend_failed(self, error: Exception) -> None:
@@ -138,7 +134,6 @@ class ControlledWrite:
                 request_hash=self.request_hash,
                 result_status=status,
                 error_code=error_code,
-                confirmed_by_user=self.confirmed_by_user,
             ),
         )
 

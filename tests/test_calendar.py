@@ -214,16 +214,14 @@ def make_config(tmp_path: Path) -> AppConfig:
         sidecar_path=tmp_path / "sidecar.sqlite3",
         eventkit_sources=(
             EventKitSource(
-                "source-icloud",
-                "iCloud",
-                True,
-                True,
+                source_id="source-icloud",
+                allow_calendar_write=True,
+                default_calendar_source=True,
             ),
             EventKitSource(
-                "source-exchange",
-                "Exchange",
-                False,
-                False,
+                source_id="source-exchange",
+                allow_calendar_write=False,
+                default_calendar_source=False,
             ),
         ),
         default_timezone="Asia/Shanghai",
@@ -526,6 +524,26 @@ def test_list_events_rejects_unconfigured_calendar(tmp_path: Path) -> None:
         )
 
 
+def test_list_events_preserves_backend_failure_during_calendar_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeCalendarBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend)
+
+    def fail_list_calendars(*, source_ids: list[str]) -> list[CalendarContainerRecord]:
+        raise CalendarBackendError(f"temporary failure for {source_ids[0]}")
+
+    monkeypatch.setattr(backend, "list_calendars", fail_list_calendars)
+
+    with pytest.raises(CalendarBackendError, match="temporary failure"):
+        repository.list_events(
+            calendar_ids=["Personal"],
+            start=datetime(2026, 7, 8, tzinfo=UTC),
+            end=datetime(2026, 7, 9, tzinfo=UTC),
+        )
+
+
 def test_list_events_rejects_naive_datetime_before_backend(tmp_path: Path) -> None:
     backend = FakeCalendarBackend()
     repository = CalendarRepository(make_config(tmp_path), backend)
@@ -535,6 +553,22 @@ def test_list_events_rejects_naive_datetime_before_backend(tmp_path: Path) -> No
             calendar_ids=["Personal"],
             start=datetime(2026, 7, 8, 9),
             end=datetime(2026, 7, 8, 18, tzinfo=UTC),
+        )
+
+    assert backend.list_calls == []
+
+
+def test_list_events_rejects_ranges_longer_than_one_year_before_backend(
+    tmp_path: Path,
+) -> None:
+    backend = FakeCalendarBackend()
+    repository = CalendarRepository(make_config(tmp_path), backend)
+
+    with pytest.raises(ValueError, match="must not exceed 366 days"):
+        repository.list_events(
+            calendar_ids=["Personal"],
+            start=datetime(2026, 1, 1, tzinfo=UTC),
+            end=datetime(2027, 1, 3, tzinfo=UTC),
         )
 
     assert backend.list_calls == []
@@ -671,7 +705,6 @@ def test_create_event_writes_calendar_once_and_records_sidecar_metadata(
     assert audit["operation"] == "calendar.create_event"
     assert audit["target_item_id"] == created.stable_id
     assert audit["result_status"] == "succeeded"
-    assert audit["confirmed_by_user"] == 0
 
 
 def test_calendar_stable_id_depends_on_external_identity_not_idempotency_key(
@@ -707,7 +740,6 @@ def test_calendar_stable_id_depends_on_external_identity_not_idempotency_key(
         completion_status="completed",
         expected_state_token=None,
         source_refs=[],
-        confirmed_by_user=True,
         idempotency_key="calendar:update:event-2",
     )
 
@@ -1141,7 +1173,6 @@ def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -
         completion_status="completed",
         expected_state_token=evidence.state_token,
         source_refs=[" file:b ", "file:a", "file:b"],
-        confirmed_by_user=True,
         idempotency_key="calendar:update:demo",
     )
     repeated = repository.update_event(
@@ -1154,7 +1185,6 @@ def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -
         completion_status="completed",
         expected_state_token=evidence.state_token,
         source_refs=["file:a", "file:b"],
-        confirmed_by_user=True,
         idempotency_key="calendar:update:demo",
     )
 
@@ -1183,7 +1213,6 @@ def test_update_event_writes_once_and_records_sidecar_metadata(tmp_path: Path) -
     assert item["external_id"] == "event-1"
     assert item["status_semantics"] == "probable"
     assert audit["target_item_id"] == updated.stable_id
-    assert audit["confirmed_by_user"] == 1
     assert item["completion_status"] == "completed"
     assert json.loads(item["source_refs_json"]) == ["file:a", "file:b"]
 
@@ -1215,7 +1244,6 @@ def test_calendar_state_token_changes_with_local_completion_status(
         completion_status="completed",
         expected_state_token=before.state_token,
         source_refs=[],
-        confirmed_by_user=True,
         idempotency_key="calendar:update:completion-token",
     )
     after = repository.list_events(
@@ -1259,7 +1287,6 @@ def test_calendar_completion_only_finalization_failure_is_retryable_local_error(
             completion_status="completed",
             expected_state_token=None,
             source_refs=[],
-            confirmed_by_user=True,
             idempotency_key="calendar:update:local-fault",
         )
 
@@ -1298,7 +1325,6 @@ def test_update_event_can_clear_description_without_completion_confirmation(
         completion_status=None,
         expected_state_token=None,
         source_refs=[],
-        confirmed_by_user=False,
         idempotency_key="calendar:update:clear",
     )
 
@@ -1313,7 +1339,7 @@ def test_update_event_can_clear_description_without_completion_confirmation(
     ]
 
 
-def test_update_event_completion_only_requires_confirmation_and_writes_no_backend(
+def test_update_event_completion_does_not_require_agent_reported_confirmation(
     tmp_path: Path,
 ) -> None:
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
@@ -1332,21 +1358,6 @@ def test_update_event_completion_only_requires_confirmation_and_writes_no_backen
     )
     repository = CalendarRepository(make_config(tmp_path), backend, sidecar)
 
-    with pytest.raises(ValueError, match="USER_CONFIRMATION_REQUIRED"):
-        repository.update_event(
-            target_ref=TargetRef(
-                resource_type="calendar_event",
-                item_id="event-1",
-                container_id="Personal",
-            ),
-            description=None,
-            completion_status="completed",
-            expected_state_token=None,
-            source_refs=[],
-            confirmed_by_user=False,
-            idempotency_key="calendar:update:unconfirmed",
-        )
-
     result = repository.update_event(
         target_ref=TargetRef(
             resource_type="calendar_event",
@@ -1357,22 +1368,11 @@ def test_update_event_completion_only_requires_confirmation_and_writes_no_backen
         completion_status="completed",
         expected_state_token=None,
         source_refs=[],
-        confirmed_by_user=True,
         idempotency_key="calendar:update:completion-only",
     )
 
     assert result.completion_status == "completed"
     assert backend.update_calls == []
-    with sidecar.connect() as connection:
-        blocked = connection.execute(
-            """
-            SELECT error_code
-            FROM operation_audit
-            WHERE operation = 'calendar.update_event'
-              AND result_status = 'blocked'
-            """
-        ).fetchone()
-    assert blocked["error_code"] == "USER_CONFIRMATION_REQUIRED"
 
 
 def test_update_event_rejects_stale_state_token_before_backend_write(
@@ -1394,7 +1394,6 @@ def test_update_event_rejects_stale_state_token_before_backend_write(
             completion_status=None,
             expected_state_token="calendar-state:stale",
             source_refs=[],
-            confirmed_by_user=False,
             idempotency_key="calendar:update:stale",
         )
 
@@ -1437,7 +1436,6 @@ def test_update_event_get_failure_is_retryable_failed_state_not_unknown(
             completion_status=None,
             expected_state_token=None,
             source_refs=[],
-            confirmed_by_user=False,
             idempotency_key="calendar:update:get-failure",
         )
 
@@ -1479,7 +1477,6 @@ def test_update_event_marks_unverified_post_write_description_unknown(
             completion_status=None,
             expected_state_token=None,
             source_refs=[],
-            confirmed_by_user=False,
             idempotency_key="calendar:update:unverified",
         )
 

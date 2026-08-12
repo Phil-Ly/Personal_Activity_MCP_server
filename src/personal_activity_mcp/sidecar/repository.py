@@ -14,7 +14,7 @@ from typing import Literal
 
 _EXPECTED_TABLES = {"mcp_item", "idempotency_key", "operation_audit"}
 _APPLICATION_ID = 0x50414D43
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _MAX_TARGETS_PER_QUERY = 400
 
 
@@ -45,7 +45,6 @@ _EXPECTED_COLUMNS = {
         "request_hash",
         "result_status",
         "error_code",
-        "confirmed_by_user",
         "created_at",
     },
     "idempotency_key": {
@@ -56,7 +55,6 @@ _EXPECTED_COLUMNS = {
         "status",
         "error_code",
         "audit_id",
-        "confirmed_by_user",
         "created_at",
         "updated_at",
     },
@@ -115,7 +113,6 @@ _SCHEMA_STATEMENTS = (
         request_hash TEXT NOT NULL,
         result_status TEXT NOT NULL,
         error_code TEXT,
-        confirmed_by_user INTEGER NOT NULL CHECK (confirmed_by_user IN (0, 1)),
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (target_item_id) REFERENCES mcp_item(id)
     )
@@ -131,9 +128,6 @@ _SCHEMA_STATEMENTS = (
         ),
         error_code TEXT,
         audit_id TEXT,
-        confirmed_by_user INTEGER NOT NULL DEFAULT 0 CHECK (
-            confirmed_by_user IN (0, 1)
-        ),
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (key, operation),
@@ -251,7 +245,7 @@ class SidecarRepository:
     def _recover_pending_operations(self, connection: sqlite3.Connection) -> None:
         pending_rows = connection.execute(
             """
-            SELECT key, operation, request_hash, confirmed_by_user
+            SELECT key, operation, request_hash
             FROM idempotency_key
             WHERE status = 'pending'
             """
@@ -266,17 +260,15 @@ class SidecarRepository:
                     target_item_id,
                     request_hash,
                     result_status,
-                    error_code,
-                    confirmed_by_user
+                    error_code
                 )
                 VALUES (?, ?, NULL, ?, 'external_state_unknown',
-                        'EXTERNAL_STATE_UNKNOWN', ?)
+                        'EXTERNAL_STATE_UNKNOWN')
                 """,
                 (
                     audit_id,
                     str(row["operation"]),
                     str(row["request_hash"]),
-                    int(row["confirmed_by_user"]),
                 ),
             )
             connection.execute(

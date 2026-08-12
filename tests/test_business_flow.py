@@ -99,7 +99,6 @@ default_timezone = "Asia/Shanghai"
 
 [[eventkit_sources]]
 source_id = "source-icloud"
-title = "iCloud"
 allow_calendar_write = true
 default_calendar_source = true
 """.strip(),

@@ -86,7 +86,6 @@ def test_initialize_creates_only_clean_schema_with_private_filesystem_modes(
         "status",
         "error_code",
         "audit_id",
-        "confirmed_by_user",
         "created_at",
         "updated_at",
     }
@@ -97,7 +96,6 @@ def test_initialize_creates_only_clean_schema_with_private_filesystem_modes(
         "request_hash",
         "result_status",
         "error_code",
-        "confirmed_by_user",
         "created_at",
     }
     assert stat.S_IMODE(database_path.parent.stat().st_mode) == 0o700
@@ -259,7 +257,6 @@ def test_initialize_marks_only_abandoned_pending_operations_unknown(
                 a.request_hash,
                 a.result_status,
                 a.error_code,
-                a.confirmed_by_user,
                 i.audit_id
             FROM idempotency_key AS i
             JOIN operation_audit AS a ON a.id = i.audit_id
@@ -271,7 +268,6 @@ def test_initialize_marks_only_abandoned_pending_operations_unknown(
         "hash-1",
         "external_state_unknown",
         "EXTERNAL_STATE_UNKNOWN",
-        0,
         recovered["audit_id"],
     )
 

@@ -52,7 +52,6 @@ class AuditWrite(BaseModel):
     request_hash: str
     result_status: str
     error_code: str | None
-    confirmed_by_user: bool
 
 
 class OperationResult(BaseModel):
@@ -85,7 +84,6 @@ class WriteControl:
         idempotency_key: str,
         operation: str,
         request_hash: str,
-        confirmed_by_user: bool = False,
     ) -> ReservationDecision:
         _require_non_empty(idempotency_key, "idempotency_key")
         _require_non_empty(operation, "operation")
@@ -105,16 +103,11 @@ class WriteControl:
                 connection.execute(
                     """
                     INSERT INTO idempotency_key (
-                        key, operation, request_hash, status, confirmed_by_user
+                        key, operation, request_hash, status
                     )
-                    VALUES (?, ?, ?, 'pending', ?)
+                    VALUES (?, ?, ?, 'pending')
                     """,
-                    (
-                        idempotency_key,
-                        operation,
-                        request_hash,
-                        1 if confirmed_by_user else 0,
-                    ),
+                    (idempotency_key, operation, request_hash),
                 )
                 return ReservationDecision(status="execute")
 
@@ -156,7 +149,6 @@ class WriteControl:
         *,
         operation: str,
         request_hash: str,
-        confirmed_by_user: bool,
     ) -> None:
         """Record a conflicting or concurrent request without changing its owner."""
         error_code = {
@@ -170,7 +162,6 @@ class WriteControl:
             target_item_id=decision.result_item_id,
             request_hash=request_hash,
             error_code=error_code,
-            confirmed_by_user=confirmed_by_user,
         )
 
     def record_blocked(
@@ -180,14 +171,12 @@ class WriteControl:
         target_item_id: str | None,
         request_hash: str,
         error_code: str,
-        confirmed_by_user: bool,
     ) -> str:
         """Append one audit for a request rejected before reservation or execution."""
         audit = AuditWrite(
             request_hash=request_hash,
             result_status="blocked",
             error_code=error_code,
-            confirmed_by_user=confirmed_by_user,
         )
         with self._repository.connect() as connection:
             _insert_audit(
@@ -503,10 +492,9 @@ def _insert_audit(
             target_item_id,
             request_hash,
             result_status,
-            error_code,
-            confirmed_by_user
+            error_code
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
             audit.audit_id,
@@ -515,7 +503,6 @@ def _insert_audit(
             audit.request_hash,
             audit.result_status,
             audit.error_code,
-            1 if audit.confirmed_by_user else 0,
         ),
     )
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -42,6 +42,9 @@ from personal_activity_mcp.time_policy import (
     normalize_external_datetime,
     require_aware_datetime,
 )
+
+_MAX_CALENDAR_QUERY_SPAN = timedelta(days=366)
+_MAX_CALENDARS_PER_QUERY = 100
 
 
 class CalendarBackend(Protocol):
@@ -131,10 +134,14 @@ class CalendarRepository:
         require_aware_datetime(end, "end")
         if start >= end:
             raise ValueError("start must be before end")
+        if end - start > _MAX_CALENDAR_QUERY_SPAN:
+            raise ValueError("Calendar query range must not exceed 366 days")
         validate_limit(limit)
         if cursor is not None:
             decode_cursor(cursor)
         selected_calendar_ids = self._select_calendar_ids(calendar_ids)
+        if len(selected_calendar_ids) > _MAX_CALENDARS_PER_QUERY:
+            raise ValueError("calendar_ids cannot include more than 100 Calendars")
         records = self._backend.list_events(
             calendar_ids=selected_calendar_ids,
             start=start,
@@ -225,7 +232,6 @@ class CalendarRepository:
             idempotency_key=idempotency_key,
             operation="calendar.create_event",
             request_hash=request_digest,
-            confirmed_by_user=False,
             resource_name="Calendar event",
         )
         decision = flow.reserve()
@@ -298,7 +304,6 @@ class CalendarRepository:
                     request_hash=request_digest,
                     result_status="succeeded",
                     error_code=None,
-                    confirmed_by_user=False,
                 ),
                 external_write_attempted=True,
             )
@@ -327,7 +332,6 @@ class CalendarRepository:
         completion_status: Literal["unknown", "incomplete", "completed"] | None,
         expected_state_token: str | None,
         source_refs: list[str],
-        confirmed_by_user: bool,
         idempotency_key: str,
     ) -> CalendarUpdateResult:
         """Update a Calendar event with allowlist, safety, idempotency, and audit controls."""
@@ -357,7 +361,6 @@ class CalendarRepository:
                 "completion_status": completion_status,
                 "expected_state_token": expected_state_token,
                 "source_refs": normalized_source_refs,
-                "confirmed_by_user": confirmed_by_user,
             }
         )
         sidecar_item = self._sidecar_item_for_calendar_event(
@@ -370,15 +373,8 @@ class CalendarRepository:
             idempotency_key=idempotency_key,
             operation="calendar.update_event",
             request_hash=request_digest,
-            confirmed_by_user=confirmed_by_user,
             resource_name="Calendar event",
         )
-        if completion_status is not None and not confirmed_by_user:
-            flow.record_blocked(
-                target_item_id=str(sidecar_item["id"]) if sidecar_item is not None else None,
-                error_code="USER_CONFIRMATION_REQUIRED",
-            )
-            raise ValueError("USER_CONFIRMATION_REQUIRED")
 
         updated_fields = [
             field
@@ -469,7 +465,6 @@ class CalendarRepository:
             request_hash=request_digest,
             result_status="succeeded",
             error_code=None,
-            confirmed_by_user=confirmed_by_user,
         )
         try:
             write_control.finalize_success(
@@ -512,37 +507,24 @@ class CalendarRepository:
         )
 
     def _select_calendar_ids(self, calendar_ids: list[str] | None) -> list[str]:
+        records = self._backend.list_calendars(source_ids=list(self._eventkit_sources))
+        available = {
+            record.calendar_id: record
+            for record in records
+            if record.source_id in self._eventkit_sources
+        }
         if calendar_ids is None:
-            records = self._backend.list_calendars(source_ids=list(self._eventkit_sources))
-            return list(
-                dict.fromkeys(
-                    record.calendar_id
-                    for record in records
-                    if record.source_id in self._eventkit_sources
-                )
-            )
-        selected: list[str] = []
-        unknown: list[str] = []
-        for calendar_id in dict.fromkeys(calendar_ids):
-            try:
-                record = self._backend.get_calendar(calendar_id=calendar_id)
-            except Exception:
-                unknown.append(calendar_id)
-                continue
-            if record.source_id not in self._eventkit_sources:
-                unknown.append(calendar_id)
-                continue
-            selected.append(calendar_id)
+            return list(available)
+        selected = list(dict.fromkeys(calendar_ids))
+        unknown = [calendar_id for calendar_id in selected if calendar_id not in available]
         if unknown:
             raise ValueError(f"Unknown calendar_ids: {', '.join(sorted(unknown))}")
         return selected
 
     def _calendar_source(self, calendar_id: str):
-        try:
-            record = self._backend.get_calendar(calendar_id=calendar_id)
-        except Exception as error:
-            raise ValueError(f"Unknown calendar_ids: {calendar_id}") from error
-        source = self._eventkit_sources.get(record.source_id)
+        records = self._backend.list_calendars(source_ids=list(self._eventkit_sources))
+        record = next((item for item in records if item.calendar_id == calendar_id), None)
+        source = self._eventkit_sources.get(record.source_id) if record is not None else None
         if source is None:
             raise ValueError(f"Unknown calendar_ids: {calendar_id}")
         return source

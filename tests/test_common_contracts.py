@@ -137,7 +137,6 @@ def test_typed_contract_errors_preserve_public_error_codes(
     [
         ("Unknown calendar_ids: Secret", "SOURCE_NOT_AUTHORIZED"),
         ("Reminder list is not allowed for writes: Work", "TARGET_READ_ONLY"),
-        ("USER_CONFIRMATION_REQUIRED", "USER_CONFIRMATION_REQUIRED"),
         ("idempotency_key conflicts with different request", "IDEMPOTENCY_CONFLICT"),
         ("start must be before end", "INVALID_ARGUMENT"),
     ],

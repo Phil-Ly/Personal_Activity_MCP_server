@@ -123,7 +123,6 @@ def eventkit_source(
 ) -> EventKitSource:
     return EventKitSource(
         source_id=source_id,
-        title=source_id,
         allow_calendar_write=writable,
         default_calendar_source=default,
     )

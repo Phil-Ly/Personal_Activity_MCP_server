@@ -117,7 +117,6 @@ def eventkit_source(
 ) -> EventKitSource:
     return EventKitSource(
         source_id=source_id,
-        title=source_id,
         allow_calendar_write=False,
         default_calendar_source=False,
         allow_reminder_write=writable,

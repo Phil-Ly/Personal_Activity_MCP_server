@@ -682,18 +682,10 @@ class EventKitClient:
         for reference in references:
             calendar = by_identifier.get(reference)
             if calendar is None:
-                matches = [item for item in available if _calendar_title(item) == reference]
-                if not matches:
-                    raise EventKitClientError(
-                        f"EventKit {container_name} not found: {reference}",
-                        external_state_changed=False,
-                    )
-                if len(matches) > 1:
-                    raise EventKitClientError(
-                        f"EventKit {container_name} title is ambiguous: {reference}",
-                        external_state_changed=False,
-                    )
-                calendar = matches[0]
+                raise EventKitClientError(
+                    f"EventKit {container_name} not found: {reference}",
+                    external_state_changed=False,
+                )
             identifier = _calendar_identifier(calendar)
             existing_reference = reference_by_identifier.get(identifier)
             if existing_reference is not None and existing_reference != reference:

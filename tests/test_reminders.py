@@ -182,20 +182,18 @@ def make_config(tmp_path: Path) -> AppConfig:
         sidecar_path=tmp_path / "sidecar.sqlite3",
         eventkit_sources=(
             EventKitSource(
-                "source-personal",
-                "Personal",
-                False,
-                False,
-                True,
-                True,
+                source_id="source-personal",
+                allow_calendar_write=False,
+                default_calendar_source=False,
+                allow_reminder_write=True,
+                default_reminder_source=True,
             ),
             EventKitSource(
-                "source-work",
-                "Work",
-                False,
-                False,
-                False,
-                False,
+                source_id="source-work",
+                allow_calendar_write=False,
+                default_calendar_source=False,
+                allow_reminder_write=False,
+                default_reminder_source=False,
             ),
         ),
         default_timezone="Asia/Shanghai",
@@ -307,6 +305,48 @@ def test_list_reminders_rejects_unconfigured_list(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Unknown reminder list_ids: Secret"):
         repository.list_reminders(
             list_ids=["Secret"],
+            start_due_at=None,
+            end_due_at=None,
+        )
+
+
+def test_list_reminders_rejects_more_than_one_hundred_lists_before_item_fetch(
+    tmp_path: Path,
+) -> None:
+    backend = FakeReminderBackend()
+    backend.lists = {
+        f"list-{index}": _reminder_list(f"list-{index}", "source-personal") for index in range(101)
+    }
+    repository = ReminderRepository(make_config(tmp_path), backend)
+
+    with pytest.raises(ValueError, match="cannot include more than 100"):
+        repository.list_reminders(
+            list_ids=None,
+            start_due_at=None,
+            end_due_at=None,
+        )
+
+    assert backend.list_calls == []
+
+
+def test_list_reminders_preserves_backend_failure_during_list_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeReminderBackend()
+    repository = ReminderRepository(make_config(tmp_path), backend)
+
+    def fail_list_reminder_lists(
+        *,
+        source_ids: list[str],
+    ) -> list[ReminderListContainerRecord]:
+        raise ReminderBackendError(f"temporary failure for {source_ids[0]}")
+
+    monkeypatch.setattr(backend, "list_reminder_lists", fail_list_reminder_lists)
+
+    with pytest.raises(ReminderBackendError, match="temporary failure"):
+        repository.list_reminders(
+            list_ids=["Personal"],
             start_due_at=None,
             end_due_at=None,
         )
@@ -554,7 +594,6 @@ def test_create_reminder_writes_once_and_records_sidecar_metadata(tmp_path: Path
     assert audit["operation"] == "reminders.create_reminder"
     assert audit["target_item_id"] == created.stable_id
     assert audit["result_status"] == "succeeded"
-    assert audit["confirmed_by_user"] == 0
 
 
 def test_reminder_stable_id_depends_on_external_identity_not_idempotency_key(
@@ -585,7 +624,6 @@ def test_reminder_stable_id_depends_on_external_identity_not_idempotency_key(
         ),
         completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
         expected_state_token=None,
-        confirmed_by_user=True,
         idempotency_key="reminder:complete:2",
     )
 
@@ -620,7 +658,6 @@ def test_complete_reminder_normalizes_submillisecond_precision_before_write(
         ),
         completion_date=datetime(2026, 7, 9, 12, 0, 0, 123456, tzinfo=UTC),
         expected_state_token=None,
-        confirmed_by_user=True,
         idempotency_key="reminder:complete:precision",
     )
 
@@ -811,36 +848,25 @@ def test_create_reminder_rejects_idempotency_conflict(tmp_path: Path) -> None:
     assert tuple(blocked) == ("blocked", "IDEMPOTENCY_CONFLICT")
 
 
-def test_complete_reminder_requires_confirmation(tmp_path: Path) -> None:
+def test_complete_reminder_does_not_require_agent_reported_confirmation(tmp_path: Path) -> None:
     sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
     sidecar.initialize()
     backend = FakeReminderBackend()
     repository = ReminderRepository(make_config(tmp_path), backend, sidecar)
 
-    with pytest.raises(ValueError, match="confirmed_by_user is required"):
-        repository.complete_reminder(
-            target_ref=TargetRef(
-                resource_type="reminder",
-                item_id="reminder-1",
-                container_id="Personal",
-            ),
-            completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
-            expected_state_token=None,
-            confirmed_by_user=False,
-            idempotency_key="reminder:complete:demo",
-        )
+    result = repository.complete_reminder(
+        target_ref=TargetRef(
+            resource_type="reminder",
+            item_id="reminder-1",
+            container_id="Personal",
+        ),
+        completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
+        expected_state_token=None,
+        idempotency_key="reminder:complete:demo",
+    )
 
-    assert backend.get_calls == []
-    assert backend.complete_calls == []
-    with sidecar.connect() as connection:
-        audit = connection.execute(
-            """
-            SELECT error_code, result_status
-            FROM operation_audit
-            WHERE operation = 'reminders.complete_reminder'
-            """
-        ).fetchone()
-    assert tuple(audit) == ("USER_CONFIRMATION_REQUIRED", "blocked")
+    assert result.is_completed is True
+    assert len(backend.complete_calls) == 1
 
 
 def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Path) -> None:
@@ -858,7 +884,6 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
         ),
         completion_date=completion_date,
         expected_state_token=None,
-        confirmed_by_user=True,
         idempotency_key="reminder:complete:demo",
     )
     repeated = repository.complete_reminder(
@@ -869,7 +894,6 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
         ),
         completion_date=completion_date,
         expected_state_token=None,
-        confirmed_by_user=True,
         idempotency_key="reminder:complete:demo",
     )
 
@@ -899,7 +923,6 @@ def test_complete_reminder_sets_completed_status_and_records_audit(tmp_path: Pat
     assert repeated.stable_id == item["id"]
     assert audit["id"] == result.audit_id
     assert audit["operation"] == "reminders.complete_reminder"
-    assert audit["confirmed_by_user"] == 1
     assert idempotency["key"] == "reminder:complete:demo"
 
 
@@ -933,7 +956,6 @@ def test_complete_reminder_reuses_already_completed_external_state_without_write
         ),
         completion_date=actual_completion,
         expected_state_token=None,
-        confirmed_by_user=True,
         idempotency_key="reminder:complete:already-completed",
     )
 
@@ -984,7 +1006,6 @@ def test_already_completed_reminder_finalization_failure_is_retryable_local_erro
             ),
             completion_date=completion_date,
             expected_state_token=None,
-            confirmed_by_user=True,
             idempotency_key="reminder:complete:local-fault",
         )
 
@@ -1011,7 +1032,6 @@ def test_complete_reminder_rejects_read_only_target_before_backend(tmp_path: Pat
             ),
             completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
             expected_state_token=None,
-            confirmed_by_user=True,
             idempotency_key="reminder:complete:read-only",
         )
 
@@ -1038,7 +1058,6 @@ def test_complete_reminder_rejects_naive_completion_date_before_backend(
             ),
             completion_date=datetime(2026, 7, 9, 12),
             expected_state_token=None,
-            confirmed_by_user=True,
             idempotency_key="reminder:complete:naive",
         )
 
@@ -1062,7 +1081,6 @@ def test_complete_reminder_rejects_stale_state_token_before_backend_write(
             ),
             completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
             expected_state_token="reminder-state:stale",
-            confirmed_by_user=True,
             idempotency_key="reminder:complete:stale",
         )
 
@@ -1093,7 +1111,6 @@ def test_complete_reminder_get_failure_is_retryable_failed_state_not_unknown(
             ),
             completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
             expected_state_token=None,
-            confirmed_by_user=True,
             idempotency_key="reminder:complete:get-failure",
         )
 
@@ -1131,7 +1148,6 @@ def test_complete_reminder_marks_wrong_backend_result_unknown(
             ),
             completion_date=datetime(2026, 7, 9, 12, tzinfo=UTC),
             expected_state_token=None,
-            confirmed_by_user=True,
             idempotency_key="reminder:complete:unverified",
         )
 

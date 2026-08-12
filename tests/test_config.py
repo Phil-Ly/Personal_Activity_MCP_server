@@ -59,7 +59,6 @@ default_timezone = "Asia/Shanghai"
 
 [[eventkit_sources]]
 source_id = "source-icloud"
-title = "iCloud"
 allow_calendar_write = true
 default_calendar_source = true
 allow_reminder_write = true
@@ -67,7 +66,6 @@ default_reminder_source = true
 
 [[eventkit_sources]]
 source_id = "source-exchange"
-title = "Exchange"
 allow_calendar_write = false
 allow_reminder_write = false
 """,
@@ -77,7 +75,6 @@ allow_reminder_write = false
 
     assert config.default_timezone == "Asia/Shanghai"
     assert config.eventkit_sources[0].source_id == "source-icloud"
-    assert config.eventkit_sources[0].title == "iCloud"
     assert config.eventkit_sources[0].allow_calendar_write is True
     assert config.eventkit_sources[0].default_calendar_source is True
     assert config.eventkit_sources[0].allow_reminder_write is True
@@ -213,134 +210,20 @@ default_reminder_source = true
         load_config(config_path)
 
 
-def test_load_config_defaults_to_private_and_strict_local_policy(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    write_config(config_path)
-
-    config = load_config(config_path)
-
-    assert config.privacy.sensitive_logging_enabled is False
-    assert config.privacy.log_calendar_notes is False
-    assert config.privacy.log_reminder_notes is False
-    assert config.privacy.log_source_refs is False
-    assert config.security.allow_remote_transport is False
-    assert config.security.allow_bulk_operations is False
-    assert config.security.allow_delete_operations is False
-    assert config.security.require_confirmation_for_event_completion_updates is True
-    assert config.security.require_confirmation_for_reminder_completion is True
-
-
-def test_load_config_accepts_explicit_privacy_and_security_policy(tmp_path: Path) -> None:
+@pytest.mark.parametrize("section", ["privacy", "security"])
+def test_load_config_rejects_removed_noop_sections(tmp_path: Path, section: str) -> None:
     config_path = tmp_path / "config.toml"
     write_config(
         config_path,
-        """
-[privacy]
-sensitive_logging_enabled = false
-log_calendar_notes = false
-log_reminder_notes = false
-log_source_refs = false
-
-[security]
-allow_remote_transport = false
-allow_bulk_operations = false
-allow_delete_operations = false
-require_confirmation_for_event_completion_updates = true
-require_confirmation_for_reminder_completion = true
-""",
-    )
-
-    config = load_config(config_path)
-
-    assert config.privacy.sensitive_logging_enabled is False
-    assert config.security.allow_delete_operations is False
-    assert config.security.require_confirmation_for_reminder_completion is True
-
-
-def test_load_config_rejects_unknown_privacy_keys(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    write_config(
-        config_path,
-        """
-[privacy]
-log_source_content = false
+        f"""
+[{section}]
+enabled = false
 """,
     )
 
     with pytest.raises(
         ConfigError,
-        match="Unknown privacy keys: log_source_content",
-    ):
-        load_config(config_path)
-
-
-def test_load_config_rejects_sensitive_detail_logging_without_opt_in(
-    tmp_path: Path,
-) -> None:
-    config_path = tmp_path / "config.toml"
-    write_config(
-        config_path,
-        """
-[privacy]
-log_calendar_notes = true
-""",
-    )
-
-    with pytest.raises(
-        ConfigError,
-        match="Sensitive logging detail flags require sensitive_logging_enabled = true",
-    ):
-        load_config(config_path)
-
-
-def test_load_config_rejects_security_policy_that_enables_frozen_delete(
-    tmp_path: Path,
-) -> None:
-    config_path = tmp_path / "config.toml"
-    write_config(
-        config_path,
-        """
-[security]
-allow_delete_operations = true
-""",
-    )
-
-    with pytest.raises(ConfigError, match="Delete operations are frozen in v1.0"):
-        load_config(config_path)
-
-
-def test_load_config_rejects_security_policy_that_disables_required_confirmation(
-    tmp_path: Path,
-) -> None:
-    config_path = tmp_path / "config.toml"
-    write_config(
-        config_path,
-        """
-[security]
-require_confirmation_for_reminder_completion = false
-""",
-    )
-
-    with pytest.raises(
-        ConfigError,
-        match="Reminder completion must require user confirmation",
-    ):
-        load_config(config_path)
-
-
-def test_load_config_rejects_unknown_security_keys(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    write_config(
-        config_path,
-        """
-[security]
-trust_agent_confirmation = true
-""",
-    )
-
-    with pytest.raises(
-        ConfigError,
-        match="Unknown security keys: trust_agent_confirmation",
+        match=rf"Unknown configuration keys: {section}",
     ):
         load_config(config_path)
 

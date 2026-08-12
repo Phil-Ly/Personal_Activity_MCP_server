@@ -82,25 +82,9 @@ sidecar_path = "~/Library/Application Support/pamcp/personal_activity.sqlite3"
 # 使用 IANA 时区名称，例如 UTC、Asia/Shanghai 或 Europe/London。
 default_timezone = "UTC"
 
-[privacy]
-# 默认禁止日志记录敏感内容。没有明确需要时不要开启。
-sensitive_logging_enabled = false
-log_calendar_notes = false
-log_reminder_notes = false
-log_source_refs = false
-
-[security]
-# 当前版本仅支持本地 stdio、单项操作且不支持删除。
-allow_remote_transport = false
-allow_bulk_operations = false
-allow_delete_operations = false
-require_confirmation_for_event_completion_updates = true
-require_confirmation_for_reminder_completion = true
-
 [[eventkit_sources]]
 # 必须使用 EventKit 原生 EKSource.sourceIdentifier，不能填写账户显示名称。
 source_id = "Your EventKit Source ID"
-title = "iCloud"
 allow_calendar_write = true
 default_calendar_source = true
 allow_reminder_write = true
@@ -114,7 +98,6 @@ default_reminder_source = true
 - `eventkit_sources`：允许 PAMCP 管理 Calendar 和 Reminder List 容器的 EventKit
   账户来源范围。
 - `source_id`：EventKit 原生 `EKSource.sourceIdentifier`，显示名称不作为身份。
-- `title`：面向 Agent 和用户显示的名称，可以与对应标识相同。
 - `allow_calendar_write`：控制该 EventKit Source 下的 Calendar 容器及日程能否被写入。
 - `default_calendar_source`：未在创建 Calendar Tool 中指定 Source 时使用的默认可写来源。
 - `allow_reminder_write`：控制该 EventKit Source 下的 Reminder List 及 Reminder
@@ -133,9 +116,6 @@ default_reminder_source = true
    Reminder Source。
 3. 让 Agent 分别调用 Calendar 与 Reminder List 容器查询能力，确认 Source 授权范围。
 4. 只对确实需要写入的 Source 开启对应的 Calendar 或 Reminder 写权限。
-5. 首次写入前让 Agent 展示将要执行的动作，并由用户明确确认。
-
-配置加载器会拒绝远程传输、批量操作、删除操作以及关闭必要确认保护的设置。
 
 ## 连接到 MCP 客户端
 

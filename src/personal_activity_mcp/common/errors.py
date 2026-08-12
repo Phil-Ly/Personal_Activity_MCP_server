@@ -79,12 +79,6 @@ def _public_failure(error: Exception) -> ToolFailure:
                 message="Requested target is not write-enabled",
                 retryable=False,
             )
-        if message in {"USER_CONFIRMATION_REQUIRED", "confirmed_by_user is required"}:
-            return ToolFailure(
-                code="USER_CONFIRMATION_REQUIRED",
-                message="Explicit user confirmation is required",
-                retryable=False,
-            )
         if "idempotency" in message and "conflict" in message:
             return ToolFailure(
                 code="IDEMPOTENCY_CONFLICT",
