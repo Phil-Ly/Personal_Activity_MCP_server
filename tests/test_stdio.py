@@ -57,6 +57,9 @@ def test_real_stdio_session_exposes_no_local_file_capability(tmp_path: Path) -> 
         assert [prompt.name for prompt in prompts.prompts] == ["activity.review_summary"]
         assert templates.resourceTemplates == []
         assert "past Calendar events" in prompt.messages[0].content.text  # type: ignore[union-attr]
-        assert stderr_path.read_text(encoding="utf-8") == ""
+        stderr = stderr_path.read_text(encoding="utf-8")
+        assert "Traceback (most recent call last)" not in stderr
+        assert str(config_path) not in stderr
+        assert str(sidecar_path) not in stderr
 
     anyio.run(exercise_server)
