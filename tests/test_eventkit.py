@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from types import SimpleNamespace
 from typing import Any
 
@@ -320,6 +320,7 @@ class FakeEvent:
 
     def setTimeZone_(self, value: FakeNSTimeZone) -> None:
         self.event_timezone = value
+        self.all_day = False
 
 
 class FakeReminder:
@@ -513,6 +514,11 @@ class FakeStore:
     ) -> tuple[bool, object | None]:
         del error
         self.saved_events.append((event, span, commit))
+        if (
+            event.isAllDay()
+            and datetime.fromtimestamp(event.event_end.timestamp).time() == time.min
+        ):
+            event.event_end.timestamp -= 1
         if (
             self.save_event_result[0]
             and self.assign_event_identifier_on_save
@@ -1079,6 +1085,31 @@ def test_create_event_sets_native_fields_and_returns_persisted_identifier() -> N
     assert store.created_event.event_timezone is not None
     assert store.created_event.event_timezone.name == "Asia/Shanghai"
     assert store.saved_events == [(store.created_event, 0, True)]
+
+
+def test_create_all_day_event_preserves_all_day_flag_after_setting_timezone() -> None:
+    calendar = FakeCalendar("calendar-1", "Personal")
+    store = FakeStore(event_calendars=[calendar])
+    client = _client(store)
+    local_timezone = datetime.now().astimezone().tzinfo
+    assert local_timezone is not None
+
+    record = client.create_event(
+        calendar_id="calendar-1",
+        title="Public holiday",
+        start=datetime(2026, 7, 8, tzinfo=local_timezone),
+        end=datetime(2026, 7, 9, tzinfo=local_timezone),
+        is_all_day=True,
+        notes=None,
+        location=None,
+        timezone="Asia/Shanghai",
+    )
+
+    assert record.is_all_day is True
+    assert record.start_date == date(2026, 7, 8)
+    assert record.end_date == date(2026, 7, 9)
+    assert store.created_event is not None
+    assert store.created_event.isAllDay() is True
 
 
 def test_update_event_clear_notes_saves_only_the_selected_event() -> None:

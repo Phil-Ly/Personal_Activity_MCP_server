@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -781,6 +781,46 @@ def test_create_event_normalizes_submillisecond_precision_before_write(
 
     assert backend.create_calls[0]["start"].microsecond == 123000
     assert backend.create_calls[0]["end"].microsecond == 654000
+
+
+def test_create_all_day_event_accepts_eventkit_inclusive_end_instant(
+    tmp_path: Path,
+) -> None:
+    class CanonicalAllDayBackend(FakeCalendarBackend):
+        def create_event(self, **kwargs) -> CalendarEventRecord:
+            record = super().create_event(**kwargs)
+            canonical = record.model_copy(
+                update={
+                    "end": record.end - timedelta(seconds=1),
+                    "start_date": date(2026, 7, 8),
+                    "end_date": date(2026, 7, 9),
+                }
+            )
+            self.events[-1] = canonical
+            return canonical
+
+    sidecar = SidecarRepository(tmp_path / "sidecar.sqlite3")
+    sidecar.initialize()
+    repository = CalendarRepository(
+        make_config(tmp_path),
+        CanonicalAllDayBackend(),
+        sidecar,
+    )
+
+    result = repository.create_event(
+        calendar_id="Personal",
+        title="Public holiday",
+        start=datetime(2026, 7, 8, tzinfo=UTC),
+        end=datetime(2026, 7, 9, tzinfo=UTC),
+        is_all_day=True,
+        notes=None,
+        location=None,
+        timezone="UTC",
+        source_refs=[],
+        idempotency_key="calendar:create:all-day-inclusive-end",
+    )
+
+    assert result.created is True
 
 
 @pytest.mark.parametrize(

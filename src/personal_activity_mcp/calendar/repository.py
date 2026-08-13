@@ -685,12 +685,15 @@ def _created_event_matches_request(
     notes: str | None,
     location: str | None,
 ) -> bool:
+    if is_all_day:
+        time_range_matches = record.start_date == start.date() and record.end_date == end.date()
+    else:
+        time_range_matches = record.start == start and record.end == end
     return (
         bool(record.event_id.strip())
         and record.calendar_id == calendar_id
         and record.title == title
-        and record.start == start
-        and record.end == end
+        and time_range_matches
         and record.is_all_day is is_all_day
         and record.notes == notes
         and record.location == location

@@ -379,10 +379,10 @@ class EventKitClient:
                 event.setTitle_(title)
                 event.setStartDate_(self._to_native_date(start))
                 event.setEndDate_(self._to_native_date(end))
+                event.setTimeZone_(native_timezone)
                 event.setAllDay_(is_all_day)
                 event.setNotes_(notes)
                 event.setLocation_(location)
-                event.setTimeZone_(native_timezone)
             except EventKitClientError:
                 raise
             except Exception as error:
@@ -921,7 +921,7 @@ class EventKitClient:
             end=end,
             is_all_day=is_all_day,
             start_date=_native_local_date(event.startDate()) if is_all_day else None,
-            end_date=_native_local_date(event.endDate()) if is_all_day else None,
+            end_date=_native_all_day_end_date(event.endDate()) if is_all_day else None,
             location=_optional_native_string(event.location()) if include_location else None,
             notes=_optional_native_string(event.notes()) if include_notes else None,
         )
@@ -1217,6 +1217,11 @@ def _optional_native_string(value: object | None) -> str | None:
 
 def _native_local_date(value: object) -> date:
     return datetime.fromtimestamp(float(value.timeIntervalSince1970())).date()
+
+
+def _native_all_day_end_date(value: object) -> date:
+    timestamp = float(value.timeIntervalSince1970())
+    return datetime.fromtimestamp(timestamp + 1).date()
 
 
 def _native_error_description(error: object | None) -> str:
